@@ -484,7 +484,7 @@ def print_summary():
 
 async def ingest_and_pierce():
     """Phase 1 (async): geocode, ingest HPD/ACRIS, pierce LLCs."""
-    print("NYC Landlord Finder — Targeted Address Test")
+    print("Owner Research Tool — Targeted Address Test")
     print("=" * 60)
 
     property_ids = []

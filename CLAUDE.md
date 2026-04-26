@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-NYC Landlord Finder is a data pipeline for researching NYC real estate property owners. It ingests property data from NYC government sources, identifies LLC/corporate entities, pierces shell LLCs to find real owners, and enriches contact data — all stored in Supabase (PostgreSQL).
+Owner Research Tool is a data pipeline for researching NYC real estate property owners. It ingests property data from NYC government sources, identifies LLC/corporate entities, pierces shell LLCs to find real owners, and enriches contact data — all stored in Supabase (PostgreSQL).
 
 ## Commands
 
@@ -34,8 +34,8 @@ python main.py schedule           # start persistent scheduler (production)
 python test_addresses.py
 
 # Deployment
-docker build -t nyc-landlord-finder .
-docker run --env-file .env nyc-landlord-finder
+docker build -t owner-research-tool .
+docker run --env-file .env owner-research-tool
 ```
 
 There is no test suite; behavior is validated by running pipeline stages against live APIs/DB.

@@ -36,7 +36,7 @@ If `.env` is staged, abort and check `.gitignore`.
 
 1. Sign up at [render.com](https://render.com) (no credit card required for the Starter plan).
 2. Connect your GitHub account.
-3. **New → Blueprint** → select `seboyer/owner-research-tool` → Render reads `render.yaml` and proposes one Web Service named `nyc-landlord-finder`.
+3. **New → Blueprint** → select `seboyer/owner-research-tool` → Render reads `render.yaml` and proposes one Web Service named `owner-research-tool`.
 4. Click **Apply**. Render begins building the Docker image.
 
 The build will take 3–5 minutes. The container will fail to fully start until you set the env vars in step 3 — that's expected.
@@ -82,10 +82,10 @@ After setting the env vars, click **Save Changes**. Render redeploys automatical
 
 ## 4. Verify the service is up
 
-Once Render shows "Live", grab your service URL — something like `https://nyc-landlord-finder.onrender.com`.
+Once Render shows "Live", grab your service URL — something like `https://owner-research-tool.onrender.com`.
 
 ```bash
-curl https://nyc-landlord-finder.onrender.com/health
+curl https://owner-research-tool.onrender.com/health
 ```
 
 Expected response:
@@ -117,7 +117,7 @@ In the **LL Pipeline** base:
 ### HTTP request action configuration
 
 - **Method:** POST
-- **URL:** `https://nyc-landlord-finder.onrender.com/webhook/airtable`
+- **URL:** `https://owner-research-tool.onrender.com/webhook/airtable`
 - **Headers:**
   - `Authorization: Bearer <the AIRTABLE_WEBHOOK_SECRET you generated>`
   - `Content-Type: application/json`

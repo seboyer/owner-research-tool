@@ -82,8 +82,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="NYC Landlord Finder",
-    description="Webhook listener + scheduler for the NYC LLC research pipeline.",
+    title="Owner Research Tool",
+    description="Webhook listener + scheduler for the NYC property-owner research pipeline.",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -225,7 +225,7 @@ async def _run_pipeline_and_writeback(payload: AirtableWebhookPayload) -> None:
 
 @app.get("/")
 async def root():
-    return {"service": "nyc-landlord-finder", "status": "ok"}
+    return {"service": "owner-research-tool", "status": "ok"}
 
 
 @app.get("/health")

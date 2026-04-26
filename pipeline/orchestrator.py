@@ -202,7 +202,7 @@ async def print_stats():
     from database.client import db
 
     tables = ["entities", "properties", "contacts", "property_roles", "entity_relationships"]
-    print("\n=== NYC Landlord Finder — Database Stats ===")
+    print("\n=== Owner Research Tool — Database Stats ===")
     for table in tables:
         res = db().table(table).select("id", count="exact").execute()
         print(f"  {table:30s}: {res.count:>8,} rows")

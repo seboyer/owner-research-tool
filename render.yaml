@@ -1,6 +1,6 @@
 services:
   - type: web                  # Web Service — exposes the Airtable webhook URL
-    name: nyc-landlord-finder
+    name: owner-research-tool
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: starter              # upgrade to standard/pro if the weekly HPD sync needs more RAM

@@ -1,5 +1,5 @@
 -- ============================================================
--- NYC Landlord Finder — Supabase Schema
+-- Owner Research Tool — Supabase Schema
 -- Run this in your Supabase SQL editor to initialize the DB.
 -- ============================================================
 

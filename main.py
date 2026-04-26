@@ -27,7 +27,7 @@ log = structlog.get_logger(__name__)
 
 @click.group()
 def cli():
-    """NYC Landlord Finder — Research Pipeline CLI"""
+    """Owner Research Tool — Research Pipeline CLI"""
     pass
 
 
