@@ -8,11 +8,14 @@ Usage:
   python main.py enrich             # Enrichment only (no new ingestion)
   python main.py stats              # Print database stats
   python main.py pierce --entity "123 BROADWAY LLC"  # Pierce a specific LLC
+  python main.py pierce --address "123 Broadway, Brooklyn, NY 11201"  # Full pipeline for an address
   python main.py schedule           # Start the persistent scheduler
 
 Examples:
   python main.py full-load
   python main.py pierce --entity "WEST 72 STREET OWNERS CORP"
+  python main.py pierce --address "67 Woodhull St, Brooklyn, NY 11231"
+  python main.py pierce --address "67 Woodhull St, Brooklyn, NY 11231" --skip-enrichment
   python main.py stats
 """
 
@@ -71,30 +74,107 @@ def stats():
 
 
 @cli.command("pierce")
-@click.option("--entity", required=True, help="Entity name to pierce (exact match)")
-def pierce(entity: str):
-    """Attempt to pierce a specific LLC by name."""
-    async def _pierce():
-        from database.client import db, find_entity_by_name
-        from enrichment.llc_piercer import pierce_entity
+@click.option("--entity", default=None, help="Entity name to pierce (exact match)")
+@click.option("--address", default=None, help='Full address to research end-to-end, e.g. "123 Broadway, Brooklyn, NY 11201"')
+@click.option("--skip-enrichment", is_flag=True, help="Skip contact enrichment (faster, no paid API spend)")
+def pierce(entity: str, address: str, skip_enrichment: bool):
+    """Pierce a specific LLC by name, or research a full address end-to-end."""
+    if not entity and not address:
+        raise click.UsageError("Provide either --entity or --address")
+    if entity and address:
+        raise click.UsageError("Provide only one of --entity or --address, not both")
 
-        ent = find_entity_by_name(entity)
-        if not ent:
-            click.echo(f"Entity not found: {entity}")
-            # Try to create it
-            click.echo("Creating entity and attempting to pierce...")
-            from database.client import upsert_entity
-            ent_id = upsert_entity(entity, "llc")
-            ent = db().table("entities").select("*").eq("id", ent_id).execute().data[0]
+    if address:
+        async def _research():
+            from pipeline.single_address import research_address
+            click.echo(f"Researching: {address}")
+            result = await research_address(address=address, skip_enrichment=skip_enrichment)
+            if result.error:
+                click.echo(f"Error: {result.error}")
+                return
+            cached_tag = " (cached)" if result.cached else ""
+            click.echo(f"\nAddress : {result.address}{cached_tag}")
+            click.echo(f"BBL     : {result.bbl}")
+            click.echo(f"Prop ID : {result.property_id}")
+            if result.hpd_reg_id:
+                click.echo(f"HPD Reg : {result.hpd_reg_id}")
+            _print_property_results(result.property_id)
 
-        click.echo(f"Piercing: {ent['name']} (id={ent['id']})")
-        success = await pierce_entity(ent)
-        if success:
-            click.echo("✓ Pierce successful — check entity_relationships table for results")
-        else:
-            click.echo("✗ Could not determine ownership through any strategy")
+        asyncio.run(_research())
+    else:
+        async def _pierce():
+            from database.client import db, find_entity_by_name
+            from enrichment.llc_piercer import pierce_entity
 
-    asyncio.run(_pierce())
+            ent = find_entity_by_name(entity)
+            if not ent:
+                click.echo(f"Entity not found: {entity}")
+                click.echo("Creating entity and attempting to pierce...")
+                from database.client import upsert_entity
+                ent_id = upsert_entity(entity, "llc")
+                ent = db().table("entities").select("*").eq("id", ent_id).execute().data[0]
+
+            click.echo(f"Piercing: {ent['name']} (id={ent['id']})")
+            success = await pierce_entity(ent)
+            if success:
+                click.echo("✓ Pierce successful — check entity_relationships table for results")
+            else:
+                click.echo("✗ Could not determine ownership through any strategy")
+
+        asyncio.run(_pierce())
+
+
+def _print_property_results(property_id: str) -> None:
+    """Print owners, relationships, and contacts for a property."""
+    if not property_id:
+        return
+    from database.client import db
+
+    roles = (
+        db().table("property_roles")
+        .select("role, source, entities(*)")
+        .eq("property_id", property_id)
+        .execute().data or []
+    )
+
+    owners = [r for r in roles if r.get("role") == "owner" and r.get("entities")]
+    managers = [r for r in roles if r.get("role") == "manager" and r.get("entities")]
+
+    if not owners and not managers:
+        click.echo("\nNo owner/manager entities found.")
+        return
+
+    click.echo("")
+    for r in owners:
+        e = r["entities"]
+        pierced = "pierced" if e.get("is_pierced") else "not pierced"
+        click.echo(f"  Owner [{r['source']}]: {e['name']} ({e['entity_type']}, {pierced})")
+
+        rels = (
+            db().table("entity_relationships")
+            .select("confidence, source, entities!entity_relationships_parent_entity_id_fkey(name, entity_type)")
+            .eq("child_entity_id", e["id"])
+            .execute().data or []
+        )
+        for rel in rels:
+            parent = rel.get("entities", {})
+            click.echo(f"    -> Real owner [{rel.get('source')}, {rel.get('confidence', 0):.0%}]: "
+                       f"{parent.get('name')} ({parent.get('entity_type')})")
+
+        contacts = (
+            db().table("contacts")
+            .select("full_name, title, email, phone, source, network_role")
+            .eq("entity_id", e["id"])
+            .execute().data or []
+        )
+        for c in contacts:
+            nr = f"[{c['network_role']}] " if c.get("network_role") else ""
+            parts = [c.get("full_name", ""), c.get("title", ""), c.get("email", ""), c.get("phone", "")]
+            click.echo(f"    Contact {nr}{' | '.join(p for p in parts if p)} [{c.get('source')}]")
+
+    for r in managers:
+        e = r["entities"]
+        click.echo(f"  Manager [{r['source']}]: {e['name']}")
 
 
 @cli.command("enrich-contacts")
