@@ -1,0 +1,78 @@
+services:
+  - type: web                  # Web Service — exposes the Airtable webhook URL
+    name: nyc-landlord-finder
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter              # upgrade to standard/pro if the weekly HPD sync needs more RAM
+
+    # The FastAPI app boots the APScheduler in its lifespan handler. Cron jobs
+    # (daily/weekly auto-search) are only registered when AUTO_SEARCH_ENABLED=true.
+    # The /webhook/airtable endpoint always works, regardless of the toggle.
+    healthCheckPath: /health
+
+    envVars:
+      # --- Required ---
+      - key: SUPABASE_URL
+        sync: false           # set in Render dashboard
+      - key: SUPABASE_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+      # --- Auto-search toggle ---
+      # Default OFF: webhook (Airtable manual feed) works, but the scheduled
+      # daily/weekly cron jobs are disabled. Flip to "true" once you've
+      # validated the pipeline against live data.
+      - key: AUTO_SEARCH_ENABLED
+        value: "false"
+
+      # --- Airtable webhook integration ---
+      # Generate AIRTABLE_WEBHOOK_SECRET as a random string (e.g. `openssl rand -hex 32`)
+      # and configure the same value in the Airtable automation HTTP step.
+      # AIRTABLE_API_KEY: personal access token with data.records:write scope.
+      - key: AIRTABLE_WEBHOOK_SECRET
+        sync: false
+      - key: AIRTABLE_API_KEY
+        sync: false
+      - key: AIRTABLE_BASE_ID
+        value: appstQVl7JeMfr7d0          # LL Pipeline
+      - key: AIRTABLE_ADDRESS_TABLE_ID
+        value: tblVOwshwfY0F3gSS          # Addresses
+      - key: AIRTABLE_BBL_FIELD_ID
+        value: fldYiP7RhhoYx6QpS          # BBL Number
+      - key: AIRTABLE_HPD_FIELD_ID
+        value: fldqyrQmuJlglgXqu          # HPD Building ID
+
+      # --- Optional: activates paid enrichment tiers ---
+      - key: NYC_OPENDATA_APP_TOKEN
+        sync: false
+      - key: BATCHDATA_API_KEY
+        sync: false
+      - key: APOLLO_API_KEY
+        sync: false
+      - key: HUNTER_API_KEY
+        sync: false
+      - key: GOOGLE_PLACES_API_KEY
+        sync: false
+      - key: PROXYCURL_API_KEY
+        sync: false
+      - key: WHITEPAGES_API_KEY
+        sync: false
+      - key: BROWSERLESS_API_KEY
+        sync: false
+      - key: SCRAPERAPI_KEY
+        sync: false
+      - key: ZOOMINFO_CLIENT_ID
+        sync: false
+      - key: ZOOMINFO_PRIVATE_KEY
+        sync: false
+      - key: ZOOMINFO_USERNAME
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+
+      # --- Pipeline settings ---
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO

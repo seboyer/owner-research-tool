@@ -1,0 +1,39 @@
+# Secrets — NEVER commit these. Use Render env vars instead.
+.env
+.env.local
+.env.*.local
+Private-Key_*.txt
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / editor
+.idea/
+.vscode/
+.claude/
+
+# Local scratch / downloads
+acris-download-test/
+*.log
+*.tmp
+downloads/
+tmp/
