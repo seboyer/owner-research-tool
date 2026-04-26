@@ -10,7 +10,7 @@ anthropic==0.28.0
 openai==1.30.0
 
 # Auth
-PyJWT==2.8.0
+PyJWT==2.10.1
 cryptography==42.0.8
 
 # Scheduling
@@ -28,7 +28,7 @@ python-dateutil==2.9.0
 # Utils
 python-dotenv==1.0.1
 structlog==24.1.0
-pydantic==2.7.1
+pydantic>=2.9.0,<3.0
 click==8.1.7
 tqdm==4.66.4
 
