@@ -58,6 +58,10 @@ def enrich_signer(signer_contact_id: str, force: bool = False) -> dict:
         stats[f"prong{r.prong}_cost_cents"] = r.cost_cents
         _persist_prong_result(signer, r)
 
+    # Stamp enrichment_complete_at once all 3 prongs have a successful run.
+    # The null guard makes this idempotent — safe to call on re-runs.
+    _stamp_enrichment_complete(signer)
+
     log.info("enrich_signer.done", **stats)
     return stats
 
@@ -295,6 +299,23 @@ def _persist_prong_result(signer: Signer, r: ProngResult):
         })
 
     _finish_run(run_id, r, status=("failed" if r.error else "success"))
+
+
+def _stamp_enrichment_complete(signer: Signer):
+    """Set enrichment_complete_at on the signer contact once all 3 prongs have succeeded.
+
+    Checks _needs_rerun for all three prongs — if any still need a run (never
+    succeeded or cache expired) we skip. The .is_("enrichment_complete_at", "null")
+    filter makes the update a no-op if the column was already stamped on a prior run.
+    """
+    all_done = all(not _needs_rerun(signer.contact_id, p) for p in (1, 2, 3))
+    if not all_done:
+        log.info("enrich_signer.enrichment_incomplete", signer=signer.full_name)
+        return
+    db().table("contacts").update({
+        "enrichment_complete_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", signer.contact_id).is_("enrichment_complete_at", "null").execute()
+    log.info("enrich_signer.enrichment_complete", signer=signer.full_name)
 
 
 def _insert_run(signer: Signer, r: ProngResult, status: str) -> str:

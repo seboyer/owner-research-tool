@@ -41,3 +41,6 @@ acris-download-test/
 *.tmp
 downloads/
 tmp/
+
+# Docs
+DEPLOYMENT.md
