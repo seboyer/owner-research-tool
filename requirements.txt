@@ -1,9 +1,9 @@
 # Core HTTP
-httpx==0.25.2
+httpx==0.28.1
 tenacity==8.2.3
 
 # Supabase
-supabase==2.4.0
+supabase==2.29.0
 
 # AI
 anthropic==0.28.0

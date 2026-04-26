@@ -2,6 +2,9 @@
 .env
 .env.local
 .env.*.local
+render.env
+render_upload.env
+render_zoominfo.env
 Private-Key_*.txt
 *.pem
 *.key

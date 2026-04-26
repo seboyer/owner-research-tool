@@ -179,4 +179,4 @@ APScheduler-based persistent service. Runs as the production entry point in Dock
 
 Render.com is the primary deployment target. The Docker container runs `python scheduler.py` as the default command (see `Dockerfile`). Auto-deploys on push to `main`.
 
-**Dependency constraint**: `supabase==2.4.0` requires `httpx<0.26,>=0.24`. Keep `httpx` pinned to `0.25.x` — do not upgrade past 0.25.x without also upgrading `supabase` to a version that supports newer httpx. `anthropic` and `openai` both accept any httpx>=0.23 so they are not the constraint.
+**Dependency constraint**: `supabase==2.29.0` requires `httpx>=0.26,<0.29`. Keep `httpx` pinned to `0.28.x`. `anthropic` and `openai` both accept any httpx>=0.23 so they are not the constraint. Upgraded from supabase==2.4.0/httpx==0.25.2 to support the new `sb_secret_` Supabase key format (old JWT service role keys are deprecated).
