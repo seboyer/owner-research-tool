@@ -9,7 +9,6 @@ Free / public sources (always on):
     acris_party_history     ACRIS Parties dataset via NYC OpenData
     hpd_building_contacts   HPD Registration Contacts via NYC OpenData
     dob_permits             NYC DOB permit issuance
-    opencorporates_graph    OpenCorporates officer/company lookups
     nys_dos                 NY State DOS corporate search (registered agents)
     claude_web_search       Claude with native web_search tool
 

@@ -203,7 +203,7 @@ def schedule():
 @cli.command("ingest")
 @click.argument("source", type=click.Choice(["hpd", "acris", "wow"]))
 def ingest(source: str):
-    """Run a single ingestor. (OpenCorporates removed — price prohibitive.)"""
+    """Run a single ingestor."""
     async def _run():
         if source == "hpd":
             from ingest.hpd import run

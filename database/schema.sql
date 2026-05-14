@@ -47,7 +47,6 @@ CREATE TABLE IF NOT EXISTS entities (
     is_building_llc     BOOLEAN DEFAULT FALSE,  -- TRUE = likely a single-building LLC
     is_pierced          BOOLEAN DEFAULT FALSE,  -- TRUE = we've attempted to find the real owner
     dos_id              TEXT,              -- NYS DOS entity ID
-    opencorporates_url  TEXT,
     registered_agent    TEXT,
     registered_agent_address TEXT,
     formation_date      DATE,
@@ -81,7 +80,7 @@ CREATE TABLE IF NOT EXISTS entity_relationships (
     parent_entity_id    UUID REFERENCES entities(id) ON DELETE CASCADE,
     relationship_type   TEXT,  -- 'owned_by', 'managed_by', 'registered_agent_of', 'affiliated_with'
     confidence          FLOAT DEFAULT 0.5,  -- 0.0 to 1.0
-    source              TEXT,  -- 'opencorporates', 'ai_inference', 'hpd', 'acris', 'wow'
+    source              TEXT,  -- 'ai_inference', 'hpd', 'acris', 'wow'
     evidence            TEXT,  -- human-readable explanation
     raw_data            JSONB,
     created_at          TIMESTAMPTZ DEFAULT NOW(),
@@ -129,7 +128,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     phone           TEXT,
     phone_type      TEXT,  -- 'direct', 'mobile', 'office', 'hq'
     linkedin_url    TEXT,
-    source          TEXT,  -- 'hpd', 'zoominfo', 'web_scrape', 'opencorporates'
+    source          TEXT,  -- 'hpd', 'zoominfo', 'web_scrape'
     confidence      FLOAT DEFAULT 0.5,
     is_primary      BOOLEAN DEFAULT FALSE,
     zoominfo_id     TEXT,
@@ -148,7 +147,7 @@ CREATE INDEX IF NOT EXISTS idx_contacts_email  ON contacts(email);
 -- ============================================================
 CREATE TABLE IF NOT EXISTS seen_records (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source      TEXT NOT NULL,   -- 'hpd_contact', 'acris_party', 'wow', 'opencorporates'
+    source      TEXT NOT NULL,   -- 'hpd_contact', 'acris_party', 'wow'
     external_id TEXT NOT NULL,   -- the source's unique ID for the record
     checksum    TEXT,            -- hash of key fields to detect changes
     created_at  TIMESTAMPTZ DEFAULT NOW(),

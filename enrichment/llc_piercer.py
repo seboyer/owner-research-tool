@@ -6,9 +6,8 @@ building LLC. Strategies are tried in order of reliability:
 
   1. ACRIS Mortgage PDF Signer  — best: finds the actual human signature
   2. Who Owns What Portfolio    — groups LLCs by apparent owner
-  3. OpenCorporates Registered Agent — shared agent = shared owner
-  4. Claude Agentic Reasoning   — AI synthesizes all signals and searches
-  5. Web Search (Claude)        — last resort: Google the LLC name
+  3. Claude Agentic Reasoning   — AI synthesizes all signals and searches
+  4. Web Search (Claude)        — last resort: Google the LLC name
 
 Each strategy writes results to entity_relationships with a confidence score.
 The entity is marked is_pierced=True when any strategy succeeds.
@@ -29,7 +28,6 @@ from database.client import (
     start_ingestion_log, finish_ingestion_log,
 )
 from enrichment.acris_pdf import pierce_llc_via_mortgage
-from ingest.opencorporates import lookup_llc, find_sibling_llcs
 from ingest.whoownswhat import lookup_entity_in_wow
 
 log = structlog.get_logger(__name__)
@@ -180,89 +178,7 @@ async def strategy_wow_portfolio(entity: dict) -> bool:
 
 
 # ============================================================
-# Strategy 3: Registered Agent Analysis
-# ============================================================
-
-async def strategy_registered_agent(entity: dict) -> bool:
-    """
-    Look up the LLC in OpenCorporates and analyze its registered agent.
-    If many LLCs share the same non-professional agent, they likely have a common owner.
-    """
-    entity_id = entity["id"]
-    entity_name = entity["name"]
-
-    # Get or fetch OpenCorporates data
-    oc_data = await lookup_llc(entity_id, entity_name)
-    if not oc_data:
-        return False
-
-    agent_name = oc_data.get("agent_name", "")
-    agent_address = oc_data.get("agent_address", "")
-    agent_type = oc_data.get("agent_type", "")
-
-    if agent_type == "professional_agent":
-        # CT Corp / CSC etc. — useless for piercing
-        log.info("llc_piercer.professional_agent_skip",
-                 entity=entity_name, agent=agent_name)
-        return False
-
-    if not agent_name:
-        return False
-
-    # The individual registered agent IS often the real owner
-    # Especially if their name is a person's name (not a company)
-    is_person = bool(re.match(r"^[A-Z][a-z]+ [A-Z][a-z]+", agent_name))
-    if is_person:
-        owner_entity_id = upsert_entity(agent_name, "individual", extra={
-            "address": agent_address or None,
-        })
-        name_parts = agent_name.split(" ", 1)
-        upsert_contact(owner_entity_id, {
-            "first_name": name_parts[0],
-            "last_name": name_parts[1] if len(name_parts) > 1 else "",
-            "full_name": agent_name,
-            "source": "opencorporates",
-            "confidence": 0.75,
-        })
-        upsert_relationship(
-            child_entity_id=entity_id,
-            parent_entity_id=owner_entity_id,
-            rel_type="owned_by",
-            source="opencorporates",
-            confidence=0.75,
-            evidence=f"Registered agent '{agent_name}' is likely the real owner",
-        )
-        log.info("llc_piercer.agent_is_person", entity=entity_name, agent=agent_name)
-        return True
-
-    # Check if multiple LLCs share this agent (cluster analysis)
-    if agent_address:
-        siblings = await find_sibling_llcs(agent_address, entity_id)
-        if len(siblings) >= 3:
-            # Significant cluster — flag for AI analysis
-            log.info("llc_piercer.sibling_cluster",
-                     entity=entity_name,
-                     sibling_count=len(siblings),
-                     agent_address=agent_address)
-            # Store siblings as affiliated entities
-            for sibling in siblings[:10]:
-                sibling_name = sibling.get("name", "")
-                if sibling_name and sibling_name != entity_name:
-                    sibling_id = upsert_entity(sibling_name, "llc")
-                    upsert_relationship(
-                        child_entity_id=sibling_id,
-                        parent_entity_id=entity_id,
-                        rel_type="affiliated_with",
-                        source="opencorporates",
-                        confidence=0.65,
-                        evidence=f"Shares registered agent address with {entity_name}",
-                    )
-
-    return False
-
-
-# ============================================================
-# Strategy 4: Claude Agentic Reasoning
+# Strategy 3: Claude Agentic Reasoning
 # ============================================================
 
 PIERCE_SYSTEM_PROMPT = """You are a real estate investigator specializing in identifying the
@@ -289,18 +205,6 @@ PIERCE_TOOLS = [
                 "query": {"type": "string", "description": "Search query"},
             },
             "required": ["query"],
-        },
-    },
-    {
-        "name": "get_opencorporates",
-        "description": "Look up a company on OpenCorporates to get registered agent and filing info",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "company_name": {"type": "string"},
-                "state": {"type": "string", "default": "NY"},
-            },
-            "required": ["company_name"],
         },
     },
     {
@@ -337,36 +241,6 @@ async def _execute_tool(tool_name: str, tool_input: dict) -> str:
             return resp.choices[0].message.content or "No results found"
         except Exception as e:
             return f"Search error: {e}"
-
-    elif tool_name == "get_opencorporates":
-        company_name = tool_input.get("company_name", "")
-        async with httpx.AsyncClient() as client:
-            params = {
-                "q": company_name,
-                "jurisdiction_code": "us_ny",
-                "per_page": 3,
-            }
-            if config.OPENCORPORATES_API_KEY:
-                params["api_token"] = config.OPENCORPORATES_API_KEY
-            try:
-                resp = await client.get(
-                    "https://api.opencorporates.com/v0.4/companies/search",
-                    params=params, timeout=10
-                )
-                data = resp.json()
-                companies = data.get("results", {}).get("companies", [])
-                if companies:
-                    c = companies[0]["company"]
-                    return json.dumps({
-                        "name": c.get("name"),
-                        "company_number": c.get("company_number"),
-                        "incorporation_date": c.get("incorporation_date"),
-                        "registered_address": c.get("registered_address"),
-                        "officers": c.get("officers", [])[:3],
-                    })
-                return "Company not found"
-            except Exception as e:
-                return f"OpenCorporates error: {e}"
 
     elif tool_name == "search_nyc_properties":
         name = tool_input.get("name", "")
@@ -427,9 +301,8 @@ Registered Agent: {registered_agent or 'Unknown'}
 
 Steps:
 1. Search the web for "{entity_name} NYC owner" and related queries
-2. Check OpenCorporates for registered agent details
-3. Look for any news, court filings, or public records mentioning this LLC
-4. If you find affiliated LLCs, research those too
+2. Look for any news, court filings, or public records mentioning this LLC
+3. If you find affiliated LLCs, research those too
 
 Return a JSON object with:
 {{
@@ -550,8 +423,6 @@ async def _process_agentic_result(result: dict, entity_id: str, entity_name: str
 STRATEGIES = [
     ("acris_pdf",       strategy_acris_pdf,       0.95),
     ("wow_portfolio",   strategy_wow_portfolio,   0.80),
-    # OpenCorporates registered-agent strategy disabled — price prohibitive.
-    # ("registered_agent", strategy_registered_agent, 0.75),
     ("claude_agentic",  strategy_claude_agentic,  0.70),
 ]
 

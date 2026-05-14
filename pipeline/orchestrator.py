@@ -8,12 +8,11 @@ Stage order and rationale:
   1. HPD Full Sync       (weekly)   — foundational: ~80K buildings, owners, agents
   2. ACRIS Delta         (daily)    — new property transfers from last N days
   3. WoW Portfolio       (weekly)   — group LLCs by apparent owner
-  4. OpenCorporates      (ongoing)  — LLC registered agent data
-  5. LLC Piercing        (ongoing)  — find real owners of building LLCs
-     5a. ACRIS PDF Signers           — mortgage doc signature extraction
-     5b. AI Agentic Reasoning        — Claude web research
-  6. Zoominfo Enrich     (ongoing)  — contact enrichment for corporate entities
-  7. Multi-Source Enrich (ongoing)  — Whitepages/PropertyRadar/Web for individuals
+  4. LLC Piercing        (ongoing)  — find real owners of building LLCs
+     4a. ACRIS PDF Signers           — mortgage doc signature extraction
+     4b. AI Agentic Reasoning        — Claude web research
+  5. Zoominfo Enrich     (ongoing)  — contact enrichment for corporate entities
+  6. Multi-Source Enrich (ongoing)  — Whitepages/PropertyRadar/Web for individuals
 """
 
 import asyncio
@@ -53,14 +52,6 @@ async def stage_wow_portfolio():
     log.info("pipeline.stage_start", stage="wow_portfolio")
     await run()
     log.info("pipeline.stage_done", stage="wow_portfolio")
-
-
-async def stage_opencorporates(batch_size: int = 50):
-    """OpenCorporates LLC lookup — run daily."""
-    from ingest.opencorporates import run_batch
-    log.info("pipeline.stage_start", stage="opencorporates")
-    await run_batch(batch_size=batch_size)
-    log.info("pipeline.stage_done", stage="opencorporates")
 
 
 async def stage_llc_piercing(batch_size: int = 20):
@@ -114,7 +105,6 @@ async def run_initial_full_load():
         ("hpd_full",           stage_hpd_full),
         ("acris_delta",        stage_acris_delta),
         ("wow_portfolio",      stage_wow_portfolio),
-        ("opencorporates",     lambda: stage_opencorporates(batch_size=100)),
         ("llc_piercing",       lambda: stage_llc_piercing(batch_size=50)),
         ("acris_pdf_pierce",   lambda: stage_acris_pdf_pierce(batch_size=30)),
         ("zoominfo_enrich",    lambda: stage_zoominfo_enrich()),
@@ -144,7 +134,6 @@ async def run_daily_pipeline():
 
     stages = [
         ("acris_delta",        stage_acris_delta),
-        ("opencorporates",     lambda: stage_opencorporates(batch_size=30)),
         ("llc_piercing",       lambda: stage_llc_piercing(batch_size=15)),
         ("acris_pdf_pierce",   lambda: stage_acris_pdf_pierce(batch_size=10)),
         ("zoominfo_enrich",    lambda: stage_zoominfo_enrich()),
@@ -185,7 +174,6 @@ async def run_enrichment_only():
     but enrichment is behind (e.g., after adding a new API key).
     """
     log.info("pipeline.enrichment_only_start")
-    await stage_opencorporates(batch_size=50)
     await stage_llc_piercing(batch_size=25)
     await stage_acris_pdf_pierce(batch_size=20)
     await stage_zoominfo_enrich()

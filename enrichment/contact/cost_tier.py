@@ -18,7 +18,7 @@ class CostTier:
 
 FREE = CostTier(
     "free", 0,
-    "Only no-cost public data (ACRIS, HPD, DOB, OpenCorporates search, NYS DOS, Claude web_search).",
+    "Only no-cost public data (ACRIS, HPD, DOB, NYS DOS, Claude web_search).",
 )
 BUDGET = CostTier(
     "budget", 50,
