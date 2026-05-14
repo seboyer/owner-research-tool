@@ -33,6 +33,7 @@ from config import config
 from database.client import (
     db, upsert_contact, update_entity,
     start_ingestion_log, finish_ingestion_log,
+    get_enrichment_batch, mark_enrichment_done, mark_enrichment_failed,
 )
 
 log = structlog.get_logger(__name__)
@@ -339,44 +340,38 @@ async def search_contacts_at_company(full_name: str, company: str) -> list:
 
 async def run_batch(batch_size: int = None):
     """
-    Enrich a batch of entities using Zoominfo.
-    Respects the ZOOMINFO_MIN_PORTFOLIO_SIZE threshold to conserve credits.
+    Enrich a batch of entities using Zoominfo, pulling from the enrichment queue.
     """
     batch_size = batch_size or config.ENRICHMENT_BATCH_SIZE
     log_id = start_ingestion_log("zoominfo_enrichment")
     stats = {"records_fetched": 0, "records_created": 0, "records_skipped": 0}
 
     try:
-        # Only enrich larger portfolios to conserve credits
-        # (Small individual landlords get enriched via other sources)
-        res = db().table("entities")\
-            .select("id, name, entity_type, portfolio_size")\
-            .in_("entity_type", ["llc", "corporation", "management_company", "unknown"])\
-            .gte("portfolio_size", config.ZOOMINFO_MIN_PORTFOLIO_SIZE)\
-            .is_("zoominfo_id", "null")\
-            .neq("enrichment_status", "done")\
-            .order("portfolio_size", desc=True)\
-            .limit(batch_size)\
-            .execute()
+        queue_rows = get_enrichment_batch(enrichment_type="zoominfo", limit=batch_size)
+        stats["records_fetched"] = len(queue_rows)
+        log.info("zoominfo.batch_start", count=len(queue_rows))
 
-        entities = res.data
-        stats["records_fetched"] = len(entities)
-        log.info("zoominfo.batch_start", count=len(entities))
-
-        for entity in entities:
+        for row in queue_rows:
+            entity = row.get("entities") or {}
+            if not entity or not entity.get("id"):
+                continue
             entity_id = entity["id"]
             entity_name = entity["name"]
 
             try:
+                # First job to pick up this entity flips 'pending' -> 'in_progress'.
+                if entity.get("enrichment_status") == "pending":
+                    update_entity(entity_id, {"enrichment_status": "in_progress"})
                 success = await enrich_entity_with_zoominfo(entity_id, entity_name)
+                mark_enrichment_done(entity_id, "zoominfo")
                 if success:
                     stats["records_created"] += 1
-                    update_entity(entity_id, {"enrichment_status": "done"})
                 else:
                     stats["records_skipped"] += 1
             except Exception as e:
-                log.error("zoominfo.entity_error", entity=entity_name, error=str(e))
-                stats["records_skipped"] += 1
+                err = f"{type(e).__name__}: {e}"
+                log.error("zoominfo.entity_error", entity=entity_name, error=err)
+                mark_enrichment_failed(entity_id, "zoominfo", err)
 
             # Zoominfo rate limit: be conservative
             await asyncio.sleep(1.5)

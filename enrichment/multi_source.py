@@ -32,6 +32,7 @@ from config import config
 from database.client import (
     db, upsert_contact, update_entity,
     start_ingestion_log, finish_ingestion_log,
+    get_enrichment_batch, mark_enrichment_done, mark_enrichment_failed,
 )
 
 log = structlog.get_logger(__name__)
@@ -552,7 +553,6 @@ async def enrich_entity(entity: dict) -> bool:
 
     if existing.data:
         log.info("multi_source.already_has_contacts", entity=entity_name)
-        update_entity(entity_id, {"enrichment_status": "done"})
         return True
 
     # Management companies + larger firms → Google Places first
@@ -591,45 +591,40 @@ async def enrich_entity(entity: dict) -> bool:
         found_any |= await enrich_via_proxycurl(entity_id, entity_name)
         await asyncio.sleep(0.5)
 
-    if found_any:
-        update_entity(entity_id, {"enrichment_status": "done"})
-
     return found_any
 
 
 async def run_batch(batch_size: int = 100):
     """
-    Enrich a batch of entities that:
-    - Are either individuals, small LLCs, or entities Zoominfo missed
-    - Don't yet have contact info
+    Enrich a batch of entities from the enrichment queue (multi_source type).
     """
     log_id = start_ingestion_log("multi_source_enrichment")
     stats = {"records_fetched": 0, "records_created": 0, "records_skipped": 0}
 
     try:
-        # Individual landlords + small LLCs (below Zoominfo threshold)
-        res = db().table("entities")\
-            .select("*")\
-            .or_("entity_type.eq.individual,entity_type.eq.unknown")\
-            .neq("enrichment_status", "done")\
-            .order("portfolio_size", desc=True)\
-            .limit(batch_size)\
-            .execute()
+        queue_rows = get_enrichment_batch(enrichment_type="multi_source", limit=batch_size)
+        stats["records_fetched"] = len(queue_rows)
+        log.info("multi_source.batch_start", count=len(queue_rows))
 
-        entities = res.data
-        stats["records_fetched"] = len(entities)
-        log.info("multi_source.batch_start", count=len(entities))
-
-        for entity in entities:
+        for row in queue_rows:
+            entity = row.get("entities") or {}
+            if not entity or not entity.get("id"):
+                continue
+            entity_id = entity["id"]
             try:
+                # First job to pick up this entity flips 'pending' -> 'in_progress'.
+                if entity.get("enrichment_status") == "pending":
+                    update_entity(entity_id, {"enrichment_status": "in_progress"})
                 found = await enrich_entity(entity)
+                mark_enrichment_done(entity_id, "multi_source")
                 if found:
                     stats["records_created"] += 1
                 else:
                     stats["records_skipped"] += 1
             except Exception as e:
-                log.error("multi_source.entity_error",
-                          entity=entity.get("name"), error=str(e))
+                err = f"{type(e).__name__}: {e}"
+                log.error("multi_source.entity_error", entity=entity.get("name"), error=err)
+                mark_enrichment_failed(entity_id, "multi_source", err)
 
             await asyncio.sleep(1)
 
