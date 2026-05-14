@@ -28,6 +28,7 @@ from database.client import (
     update_entity, already_seen, mark_seen,
     start_ingestion_log, finish_ingestion_log,
 )
+from database.retry import retry_external
 from enrichment.acris_pdf import pierce_llc_via_mortgage
 from ingest.opencorporates import lookup_llc, find_sibling_llcs
 from ingest.whoownswhat import lookup_entity_in_wow
@@ -104,6 +105,18 @@ async def strategy_wow_portfolio(entity: dict) -> bool:
     import httpx
     from config import config as _cfg
 
+    @retry_external(max_attempts=5)
+    async def _fetch_regs(client: httpx.AsyncClient, params: dict) -> list[dict]:
+        resp = await client.get(_cfg.HPD_REGISTRATIONS_URL, params=params, timeout=30.0)
+        resp.raise_for_status()
+        return resp.json()
+
+    @retry_external(max_attempts=5)
+    async def _fetch_contacts(client: httpx.AsyncClient, params: dict) -> list[dict]:
+        resp = await client.get(_cfg.HPD_CONTACTS_URL, params=params, timeout=30.0)
+        resp.raise_for_status()
+        return resp.json()
+
     async with httpx.AsyncClient() as client:
         # Query HPD registrations for this BBL
         params = {
@@ -115,8 +128,7 @@ async def strategy_wow_portfolio(entity: dict) -> bool:
             params["$$app_token"] = _cfg.NYC_OPENDATA_APP_TOKEN
 
         try:
-            resp = await client.get(_cfg.HPD_REGISTRATIONS_URL, params=params, timeout=15)
-            regs = resp.json() if resp.status_code == 200 else []
+            regs = await _fetch_regs(client, params)
         except Exception as e:
             log.warning("llc_piercer.hpd_portfolio_error", error=str(e))
             return False
@@ -128,12 +140,11 @@ async def strategy_wow_portfolio(entity: dict) -> bool:
         ids_clause = " OR ".join(f"registrationid='{rid}'" for rid in reg_ids)
 
         try:
-            cresp = await client.get(_cfg.HPD_CONTACTS_URL, params={
+            contacts = await _fetch_contacts(client, {
                 "$where": ids_clause,
                 "$limit": 20,
                 **({"$$app_token": _cfg.NYC_OPENDATA_APP_TOKEN} if _cfg.NYC_OPENDATA_APP_TOKEN else {}),
-            }, timeout=15)
-            contacts = cresp.json() if cresp.status_code == 200 else []
+            })
         except Exception as e:
             log.warning("llc_piercer.hpd_contacts_error", error=str(e))
             return False

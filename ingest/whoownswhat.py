@@ -29,8 +29,17 @@ from database.client import (
     upsert_relationship, update_entity,
     start_ingestion_log, finish_ingestion_log,
 )
+from database.retry import retry_external
 
 log = structlog.get_logger(__name__)
+
+
+@retry_external(max_attempts=3)
+async def _fetch_wow_search(client: httpx.AsyncClient, params: dict) -> httpx.Response:
+    """Inner HTTP helper for WoW address search — retried on transient errors."""
+    resp = await client.get(config.WOW_SEARCH_URL, params=params, timeout=30.0)
+    resp.raise_for_status()
+    return resp
 
 
 async def search_wow(house_number: str, street: str, borough: str, zip_code: str = "") -> dict | None:
@@ -53,10 +62,9 @@ async def search_wow(house_number: str, street: str, borough: str, zip_code: str
             "zip": zip_code or "",
         }
         try:
-            resp = await client.get(config.WOW_SEARCH_URL, params=params, timeout=15)
+            resp = await _fetch_wow_search(client, params)
             if resp.status_code == 404:
                 return None
-            resp.raise_for_status()
             content_type = resp.headers.get("content-type", "")
             if "text/html" in content_type:
                 # WoW API is returning HTML (SPA shell) — the JSON API is gone.
@@ -69,6 +77,14 @@ async def search_wow(house_number: str, street: str, borough: str, zip_code: str
             return None
 
 
+@retry_external(max_attempts=3)
+async def _fetch_wow_portfolio(client: httpx.AsyncClient, bbl: str) -> httpx.Response:
+    """Inner HTTP helper for WoW portfolio lookup — retried on transient errors."""
+    resp = await client.get(f"{config.WOW_PORTFOLIO_URL}/{bbl}", timeout=30.0)
+    resp.raise_for_status()
+    return resp
+
+
 async def get_wow_portfolio(bbl: str) -> dict | None:
     """
     Get the full portfolio for a BBL from WoW.
@@ -77,13 +93,9 @@ async def get_wow_portfolio(bbl: str) -> dict | None:
     async with httpx.AsyncClient() as client:
         try:
             # WoW portfolio endpoint accepts BBL
-            resp = await client.get(
-                f"{config.WOW_PORTFOLIO_URL}/{bbl}",
-                timeout=15
-            )
+            resp = await _fetch_wow_portfolio(client, bbl)
             if resp.status_code in (404, 422):
                 return None
-            resp.raise_for_status()
             content_type = resp.headers.get("content-type", "")
             if "text/html" in content_type:
                 log.warning("wow.api_dead", bbl=bbl, msg="WoW returned HTML — API endpoint has changed")

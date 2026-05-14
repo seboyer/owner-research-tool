@@ -27,13 +27,13 @@ from typing import Optional
 import httpx
 import jwt  # PyJWT
 import structlog
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config import config
 from database.client import (
     db, upsert_contact, update_entity,
     start_ingestion_log, finish_ingestion_log,
 )
+from database.retry import retry_external
 
 log = structlog.get_logger(__name__)
 
@@ -58,6 +58,19 @@ def _generate_jwt() -> str:
     return jwt.encode(payload, private_key, algorithm="RS256")
 
 
+@retry_external(max_attempts=3)
+async def _fetch_access_token(jwt_token: str) -> httpx.Response:
+    """Inner HTTP helper for Zoominfo auth token exchange — retried on transient errors."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            config.ZOOMINFO_AUTH_URL,
+            json={"jwt": jwt_token},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        return resp
+
+
 async def get_access_token() -> str:
     """Get a valid Zoominfo access token, refreshing if expired."""
     global _access_token, _token_expires_at
@@ -66,16 +79,10 @@ async def get_access_token() -> str:
         return _access_token
 
     jwt_token = _generate_jwt()
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            config.ZOOMINFO_AUTH_URL,
-            json={"jwt": jwt_token},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        _access_token = data["jwt"]
-        _token_expires_at = time.time() + data.get("expiresIn", 3600)
+    resp = await _fetch_access_token(jwt_token)
+    data = resp.json()
+    _access_token = data["jwt"]
+    _token_expires_at = time.time() + data.get("expiresIn", 3600)
 
     return _access_token
 
@@ -95,7 +102,7 @@ class ZoominfoClient:
             "Content-Type": "application/json",
         }
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=15))
+    @retry_external(max_attempts=3)
     async def search_company(self, company_name: str, city: str = "New York") -> list[dict]:
         """Search for a company by name. Returns list of matches."""
         async with httpx.AsyncClient() as client:
@@ -114,7 +121,7 @@ class ZoominfoClient:
                         "linkedinUrl",
                     ],
                 },
-                timeout=20,
+                timeout=30.0,
             )
             if resp.status_code == 404:
                 return []
@@ -122,7 +129,7 @@ class ZoominfoClient:
             data = resp.json()
             return data.get("data", {}).get("outputFields", [])
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=15))
+    @retry_external(max_attempts=3)
     async def search_contacts(
         self,
         company_id: str,
@@ -151,7 +158,7 @@ class ZoominfoClient:
                         "companyId", "companyName",
                     ],
                 },
-                timeout=20,
+                timeout=30.0,
             )
             if resp.status_code == 404:
                 return []
@@ -159,14 +166,14 @@ class ZoominfoClient:
             data = resp.json()
             return data.get("data", {}).get("outputFields", [])
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=15))
+    @retry_external(max_attempts=3)
     async def enrich_company(self, company_id: str) -> dict | None:
         """Get full enrichment data for a Zoominfo company ID."""
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{config.ZOOMINFO_COMPANY_ENRICH_URL}/{company_id}",
                 headers=await self._headers(),
-                timeout=20,
+                timeout=30.0,
             )
             if resp.status_code == 404:
                 return None

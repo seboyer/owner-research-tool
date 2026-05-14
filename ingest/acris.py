@@ -30,6 +30,7 @@ from database.client import (
     upsert_property, upsert_entity, upsert_property_role,
     start_ingestion_log, finish_ingestion_log,
 )
+from database.retry import retry_external
 from ingest.hpd import paginate  # reuse the same paginator
 
 log = structlog.get_logger(__name__)
@@ -55,6 +56,23 @@ async def _fetch_deed_doc_ids(since_date: datetime) -> list[str]:
     return doc_ids
 
 
+@retry_external(max_attempts=5)
+async def _fetch_parties_chunk(client: httpx.AsyncClient, chunk: list[str]) -> list[dict]:
+    """Fetch buyer parties for one chunk of document IDs from Socrata."""
+    ids_clause = ",".join(f"'{d}'" for d in chunk)
+    where = f"document_id in ({ids_clause}) AND party_type='{BUYER_PARTY_TYPE}'"
+    params = {
+        "$where": where,
+        "$limit": 5000,
+        "$order": "document_id",
+    }
+    if config.NYC_OPENDATA_APP_TOKEN:
+        params["$$app_token"] = config.NYC_OPENDATA_APP_TOKEN
+    resp = await client.get(config.ACRIS_PARTIES_URL, params=params, timeout=30.0)
+    resp.raise_for_status()
+    return resp.json()
+
+
 async def _fetch_parties_for_docs(doc_ids: list[str]) -> dict[str, list[dict]]:
     """
     Fetch buyer parties for a batch of document IDs.
@@ -67,24 +85,32 @@ async def _fetch_parties_for_docs(doc_ids: list[str]) -> dict[str, list[dict]]:
     async with httpx.AsyncClient() as client:
         for i in range(0, len(doc_ids), chunk_size):
             chunk = doc_ids[i : i + chunk_size]
-            ids_clause = ",".join(f"'{d}'" for d in chunk)
-            where = f"document_id in ({ids_clause}) AND party_type='{BUYER_PARTY_TYPE}'"
-            params = {
-                "$where": where,
-                "$limit": 5000,
-                "$order": "document_id",
-            }
-            if config.NYC_OPENDATA_APP_TOKEN:
-                params["$$app_token"] = config.NYC_OPENDATA_APP_TOKEN
-
-            resp = await client.get(config.ACRIS_PARTIES_URL, params=params, timeout=30)
-            resp.raise_for_status()
-            for row in resp.json():
+            try:
+                rows = await _fetch_parties_chunk(client, chunk)
+            except Exception:
+                rows = []
+            for row in rows:
                 doc_id = row["document_id"]
                 parties.setdefault(doc_id, []).append(row)
             await asyncio.sleep(0.1)
 
     return parties
+
+
+@retry_external(max_attempts=5)
+async def _fetch_legals_chunk(client: httpx.AsyncClient, chunk: list[str]) -> list[dict]:
+    """Fetch legals for one chunk of document IDs from Socrata."""
+    ids_clause = ",".join(f"'{d}'" for d in chunk)
+    where = f"document_id in ({ids_clause})"
+    params = {
+        "$where": where,
+        "$limit": 5000,
+    }
+    if config.NYC_OPENDATA_APP_TOKEN:
+        params["$$app_token"] = config.NYC_OPENDATA_APP_TOKEN
+    resp = await client.get(config.ACRIS_LEGALS_URL, params=params, timeout=30.0)
+    resp.raise_for_status()
+    return resp.json()
 
 
 async def _fetch_legals_for_docs(doc_ids: list[str]) -> dict[str, dict]:
@@ -98,18 +124,11 @@ async def _fetch_legals_for_docs(doc_ids: list[str]) -> dict[str, dict]:
     async with httpx.AsyncClient() as client:
         for i in range(0, len(doc_ids), chunk_size):
             chunk = doc_ids[i : i + chunk_size]
-            ids_clause = ",".join(f"'{d}'" for d in chunk)
-            where = f"document_id in ({ids_clause})"
-            params = {
-                "$where": where,
-                "$limit": 5000,
-            }
-            if config.NYC_OPENDATA_APP_TOKEN:
-                params["$$app_token"] = config.NYC_OPENDATA_APP_TOKEN
-
-            resp = await client.get(config.ACRIS_LEGALS_URL, params=params, timeout=30)
-            resp.raise_for_status()
-            for row in resp.json():
+            try:
+                rows = await _fetch_legals_chunk(client, chunk)
+            except Exception:
+                rows = []
+            for row in rows:
                 doc_id = row["document_id"]
                 if doc_id not in legals:
                     legals[doc_id] = row

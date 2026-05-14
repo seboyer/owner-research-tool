@@ -13,6 +13,7 @@ import httpx
 import structlog
 
 from config import config
+from database.retry import retry_external
 from ..models import ContactHit
 
 log = structlog.get_logger(__name__)
@@ -27,6 +28,14 @@ def _headers() -> dict:
     return h
 
 
+@retry_external(max_attempts=5)
+async def _fetch_dob_permits(client: httpx.AsyncClient, params: dict) -> list[dict]:
+    """Inner HTTP helper for DOB permits query — retried on transient errors."""
+    r = await client.get(DOB_PERMITS_URL, headers=_headers(), params=params)
+    r.raise_for_status()
+    return r.json()
+
+
 async def permits_for_bbl(bbl: str, limit: int = 25) -> list[ContactHit]:
     if not bbl or len(bbl) < 10:
         return []
@@ -37,11 +46,9 @@ async def permits_for_bbl(bbl: str, limit: int = 25) -> list[ContactHit]:
     where = f"borough='{boro_names.get(boro, '')}' AND block='{block}' AND lot='{lot}'"
     params = {"$where": where, "$limit": limit, "$order": "filing_date DESC"}
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            r = await client.get(DOB_PERMITS_URL, headers=_headers(), params=params)
-            r.raise_for_status()
-            rows = r.json()
+            rows = await _fetch_dob_permits(client, params)
         except Exception as e:
             log.warn("dob_permits.query_failed", bbl=bbl, error=str(e))
             return []

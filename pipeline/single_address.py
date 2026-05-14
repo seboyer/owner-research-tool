@@ -30,6 +30,7 @@ from database.client import (
     upsert_contact,
     upsert_property_role,
 )
+from database.retry import retry_external
 from enrichment.llc_piercer import pierce_entity
 from enrichment.contact import enrich_pending_signers
 
@@ -79,12 +80,22 @@ class AddressResult:
 # Step 1: Geocode → BBL
 # ============================================================
 
+@retry_external(max_attempts=3)
+async def _fetch_geocode(client: httpx.AsyncClient, address: str) -> httpx.Response:
+    """Inner HTTP helper for NYC GeoSearch — retried on transient errors."""
+    resp = await client.get(
+        "https://geosearch.planninglabs.nyc/v2/search",
+        params={"text": address, "size": 1},
+        timeout=15.0,
+    )
+    resp.raise_for_status()
+    return resp
+
+
 async def _geocode(address: str, client: httpx.AsyncClient) -> Optional[dict]:
     """NYC Planning Labs GeoSearch → BBL + normalized address."""
-    url = "https://geosearch.planninglabs.nyc/v2/search"
     try:
-        resp = await client.get(url, params={"text": address, "size": 1}, timeout=15)
-        resp.raise_for_status()
+        resp = await _fetch_geocode(client, address)
     except Exception as e:
         log.error("geocode.error", address=address, error=str(e))
         return None
@@ -130,6 +141,22 @@ def _existing_property(bbl: str) -> Optional[dict]:
 # Step 2: HPD ingest for a single BBL
 # ============================================================
 
+@retry_external(max_attempts=5)
+async def _fetch_hpd_regs_for_bbl(client: httpx.AsyncClient, params: dict) -> list[dict]:
+    """Inner HTTP helper for HPD registrations by BBL — retried on transient errors."""
+    resp = await client.get(config.HPD_REGISTRATIONS_URL, params=params, timeout=30.0)
+    resp.raise_for_status()
+    return resp.json()
+
+
+@retry_external(max_attempts=5)
+async def _fetch_hpd_contacts_for_bbl(client: httpx.AsyncClient, params: dict) -> list[dict]:
+    """Inner HTTP helper for HPD contacts by registration IDs — retried on transient errors."""
+    resp = await client.get(config.HPD_CONTACTS_URL, params=params, timeout=30.0)
+    resp.raise_for_status()
+    return resp.json()
+
+
 async def _ingest_hpd(
     bbl: str, address: str, borough: str, zip_code: str,
     client: httpx.AsyncClient,
@@ -147,8 +174,10 @@ async def _ingest_hpd(
     if config.NYC_OPENDATA_APP_TOKEN:
         params["$$app_token"] = config.NYC_OPENDATA_APP_TOKEN
 
-    resp = await client.get(config.HPD_REGISTRATIONS_URL, params=params, timeout=20)
-    regs = resp.json() if resp.status_code == 200 else []
+    try:
+        regs = await _fetch_hpd_regs_for_bbl(client, params)
+    except Exception:
+        regs = []
     if not regs:
         return None
 
@@ -179,8 +208,10 @@ async def _ingest_hpd(
     if config.NYC_OPENDATA_APP_TOKEN:
         c_params["$$app_token"] = config.NYC_OPENDATA_APP_TOKEN
 
-    cresp = await client.get(config.HPD_CONTACTS_URL, params=c_params, timeout=20)
-    contacts = cresp.json() if cresp.status_code == 200 else []
+    try:
+        contacts = await _fetch_hpd_contacts_for_bbl(client, c_params)
+    except Exception:
+        contacts = []
 
     for c in contacts:
         ctype = c.get("type", "")
@@ -221,6 +252,30 @@ async def _ingest_hpd(
 # Step 3: ACRIS mortgage data (supplements HPD owner data)
 # ============================================================
 
+@retry_external(max_attempts=5)
+async def _fetch_acris_legals(client: httpx.AsyncClient, params: dict) -> list[dict]:
+    """Inner HTTP helper for ACRIS legals — retried on transient errors."""
+    resp = await client.get(config.ACRIS_LEGALS_URL, params=params, timeout=30.0)
+    resp.raise_for_status()
+    return resp.json()
+
+
+@retry_external(max_attempts=5)
+async def _fetch_acris_masters(client: httpx.AsyncClient, params: dict) -> list[dict]:
+    """Inner HTTP helper for ACRIS masters — retried on transient errors."""
+    resp = await client.get(config.ACRIS_MASTER_URL, params=params, timeout=30.0)
+    resp.raise_for_status()
+    return resp.json()
+
+
+@retry_external(max_attempts=5)
+async def _fetch_acris_parties(client: httpx.AsyncClient, params: dict) -> list[dict]:
+    """Inner HTTP helper for ACRIS parties — retried on transient errors."""
+    resp = await client.get(config.ACRIS_PARTIES_URL, params=params, timeout=30.0)
+    resp.raise_for_status()
+    return resp.json()
+
+
 async def _ingest_acris(bbl: str, property_id: str, client: httpx.AsyncClient) -> None:
     boro = bbl[0]
     block = bbl[1:6].lstrip("0") or "0"
@@ -234,8 +289,10 @@ async def _ingest_acris(bbl: str, property_id: str, client: httpx.AsyncClient) -
     if config.NYC_OPENDATA_APP_TOKEN:
         params["$$app_token"] = config.NYC_OPENDATA_APP_TOKEN
 
-    resp = await client.get(config.ACRIS_LEGALS_URL, params=params, timeout=20)
-    legals = resp.json() if resp.status_code == 200 else []
+    try:
+        legals = await _fetch_acris_legals(client, params)
+    except Exception:
+        legals = []
     if not legals:
         return
 
@@ -252,8 +309,10 @@ async def _ingest_acris(bbl: str, property_id: str, client: httpx.AsyncClient) -
     if config.NYC_OPENDATA_APP_TOKEN:
         m_params["$$app_token"] = config.NYC_OPENDATA_APP_TOKEN
 
-    mresp = await client.get(config.ACRIS_MASTER_URL, params=m_params, timeout=20)
-    masters = mresp.json() if mresp.status_code == 200 else []
+    try:
+        masters = await _fetch_acris_masters(client, m_params)
+    except Exception:
+        masters = []
     if not masters:
         return
 
@@ -266,8 +325,10 @@ async def _ingest_acris(bbl: str, property_id: str, client: httpx.AsyncClient) -
         if config.NYC_OPENDATA_APP_TOKEN:
             p_params["$$app_token"] = config.NYC_OPENDATA_APP_TOKEN
 
-        presp = await client.get(config.ACRIS_PARTIES_URL, params=p_params, timeout=20)
-        parties = presp.json() if presp.status_code == 200 else []
+        try:
+            parties = await _fetch_acris_parties(client, p_params)
+        except Exception:
+            parties = []
 
         for party in parties:
             ptype = party.get("party_type", "")
@@ -314,8 +375,10 @@ async def _ingest_acris_deed_fallback(
     if config.NYC_OPENDATA_APP_TOKEN:
         params["$$app_token"] = config.NYC_OPENDATA_APP_TOKEN
 
-    resp = await client.get(config.ACRIS_LEGALS_URL, params=params, timeout=20)
-    legals = resp.json() if resp.status_code == 200 else []
+    try:
+        legals = await _fetch_acris_legals(client, params)
+    except Exception:
+        legals = []
     if not legals:
         return None
 
@@ -331,8 +394,10 @@ async def _ingest_acris_deed_fallback(
     if config.NYC_OPENDATA_APP_TOKEN:
         m_params["$$app_token"] = config.NYC_OPENDATA_APP_TOKEN
 
-    mresp = await client.get(config.ACRIS_MASTER_URL, params=m_params, timeout=20)
-    deeds = mresp.json() if mresp.status_code == 200 else []
+    try:
+        deeds = await _fetch_acris_masters(client, m_params)
+    except Exception:
+        deeds = []
     if not deeds:
         return None
 
@@ -358,8 +423,10 @@ async def _ingest_acris_deed_fallback(
         if config.NYC_OPENDATA_APP_TOKEN:
             p_params["$$app_token"] = config.NYC_OPENDATA_APP_TOKEN
 
-        presp = await client.get(config.ACRIS_PARTIES_URL, params=p_params, timeout=20)
-        parties = presp.json() if presp.status_code == 200 else []
+        try:
+            parties = await _fetch_acris_parties(client, p_params)
+        except Exception:
+            parties = []
 
         for party in parties:
             name = party.get("name", "").strip()

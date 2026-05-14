@@ -35,6 +35,7 @@ import httpx
 import structlog
 
 from config import config
+from database.retry import retry_external
 from ..models import ContactHit
 
 log = structlog.get_logger(__name__)
@@ -56,6 +57,19 @@ def _headers() -> dict:
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
+
+
+@retry_external(max_attempts=3)
+async def _post_skip_trace(payload: dict) -> dict:
+    """Inner HTTP helper for BatchData V3 skip trace — retried on transient errors."""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(
+            f"{_BASE}/property/skip-trace",
+            headers=_headers(),
+            json=payload,
+        )
+        r.raise_for_status()
+        return r.json()
 
 
 async def skip_trace_property(
@@ -123,22 +137,15 @@ async def skip_trace_property(
     }
 
     # --- API call ----------------------------------------------------------
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            r = await client.post(
-                f"{_BASE}/property/skip-trace",
-                headers=_headers(),
-                json=payload,
-            )
-            r.raise_for_status()
-            data = r.json()
-        except httpx.HTTPStatusError as e:
-            log.warn("batchdata.skip_trace.http_error",
-                     status=e.response.status_code, body=e.response.text[:200])
-            return []
-        except Exception as e:
-            log.warn("batchdata.skip_trace.failed", error=str(e))
-            return []
+    try:
+        data = await _post_skip_trace(payload)
+    except httpx.HTTPStatusError as e:
+        log.warn("batchdata.skip_trace.http_error",
+                 status=e.response.status_code, body=e.response.text[:200])
+        return []
+    except Exception as e:
+        log.warn("batchdata.skip_trace.failed", error=str(e))
+        return []
 
     result_items = (data.get("result", {}).get("data") or [])
     if not result_items:

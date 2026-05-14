@@ -17,6 +17,7 @@ import os
 import httpx
 import structlog
 
+from database.retry import retry_external
 from ..models import ContactHit, CompanyHit
 
 log = structlog.get_logger(__name__)
@@ -30,17 +31,26 @@ def _key(name: str) -> str:
 # Hunter.io — domain email finder
 # ============================================================
 
+@retry_external(max_attempts=3)
+async def _fetch_hunter(client: httpx.AsyncClient, domain: str, k: str) -> list[dict]:
+    """Inner HTTP helper for Hunter.io domain search — retried on transient errors."""
+    r = await client.get(
+        "https://api.hunter.io/v2/domain-search",
+        params={"domain": domain, "api_key": k, "limit": 25},
+        timeout=15.0,
+    )
+    r.raise_for_status()
+    return r.json().get("data", {}).get("emails", [])
+
+
 async def hunter_domain_search(domain: str) -> list[ContactHit]:
     k = _key("HUNTER_API_KEY")
     if not k or not domain:
         log.debug("hunter.skipped", domain=domain, has_key=bool(k))
         return []
-    url = "https://api.hunter.io/v2/domain-search"
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient() as client:
         try:
-            r = await client.get(url, params={"domain": domain, "api_key": k, "limit": 25})
-            r.raise_for_status()
-            emails = r.json().get("data", {}).get("emails", [])
+            emails = await _fetch_hunter(client, domain, k)
         except Exception as e:
             log.warn("hunter.failed", error=str(e))
             return []
@@ -69,34 +79,43 @@ async def hunter_domain_search(domain: str) -> list[ContactHit]:
 # Google Places — company phone/website by name
 # ============================================================
 
+@retry_external(max_attempts=3)
+async def _fetch_gplaces_find(client: httpx.AsyncClient, name: str, city: str, k: str) -> list[dict]:
+    """Inner HTTP helper for Google Places findplacefromtext — retried on transient errors."""
+    r = await client.get(
+        "https://maps.googleapis.com/maps/api/place/findplacefromtext/json",
+        params={"input": f"{name} {city}", "inputtype": "textquery",
+                "fields": "place_id,name,formatted_address", "key": k},
+        timeout=15.0,
+    )
+    r.raise_for_status()
+    return r.json().get("candidates", [])
+
+
+@retry_external(max_attempts=3)
+async def _fetch_gplaces_details(client: httpx.AsyncClient, pid: str, k: str) -> dict:
+    """Inner HTTP helper for Google Places details — retried on transient errors."""
+    r = await client.get(
+        "https://maps.googleapis.com/maps/api/place/details/json",
+        params={"place_id": pid, "fields": "name,formatted_phone_number,website,formatted_address", "key": k},
+        timeout=30.0,
+    )
+    r.raise_for_status()
+    return r.json().get("result", {})
+
+
 async def google_places_find_company(name: str, city: str = "New York, NY") -> list[CompanyHit]:
     k = _key("GOOGLE_PLACES_API_KEY")
     if not k:
         log.debug("google_places.skipped", name=name)
         return []
-    # Places "findplacefromtext" -> details
-    find_url = "https://maps.googleapis.com/maps/api/place/findplacefromtext/json"
-    details_url = "https://maps.googleapis.com/maps/api/place/details/json"
-    async with httpx.AsyncClient(timeout=20) as client:
+    async with httpx.AsyncClient() as client:
         try:
-            r = await client.get(find_url, params={
-                "input": f"{name} {city}",
-                "inputtype": "textquery",
-                "fields": "place_id,name,formatted_address",
-                "key": k,
-            })
-            r.raise_for_status()
-            cands = r.json().get("candidates", [])
+            cands = await _fetch_gplaces_find(client, name, city, k)
             if not cands:
                 return []
             pid = cands[0]["place_id"]
-            r2 = await client.get(details_url, params={
-                "place_id": pid,
-                "fields": "name,formatted_phone_number,website,formatted_address",
-                "key": k,
-            })
-            r2.raise_for_status()
-            res = r2.json().get("result", {})
+            res = await _fetch_gplaces_details(client, pid, k)
         except Exception as e:
             log.warn("google_places.failed", error=str(e))
             return []
@@ -117,24 +136,30 @@ async def google_places_find_company(name: str, city: str = "New York, NY") -> l
 # Apollo.io — person + email + phone
 # ============================================================
 
+@retry_external(max_attempts=3)
+async def _fetch_apollo_person(client: httpx.AsyncClient, payload: dict, k: str) -> dict:
+    """Inner HTTP helper for Apollo.io person match — retried on transient errors."""
+    r = await client.post(
+        "https://api.apollo.io/v1/people/match",
+        json=payload,
+        headers={"X-Api-Key": k, "Content-Type": "application/json"},
+        timeout=30.0,
+    )
+    r.raise_for_status()
+    return r.json().get("person", {})
+
+
 async def apollo_person_match(full_name: str, company: str = None) -> list[ContactHit]:
     k = _key("APOLLO_API_KEY")
     if not k:
         log.debug("apollo.skipped", name=full_name)
         return []
-    url = "https://api.apollo.io/v1/people/match"
     payload = {"name": full_name}
     if company:
         payload["organization_name"] = company
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient() as client:
         try:
-            r = await client.post(
-                url,
-                json=payload,
-                headers={"X-Api-Key": k, "Content-Type": "application/json"},
-            )
-            r.raise_for_status()
-            p = r.json().get("person", {})
+            p = await _fetch_apollo_person(client, payload, k)
         except Exception as e:
             log.warn("apollo.failed", error=str(e))
             return []
@@ -163,6 +188,19 @@ async def apollo_person_match(full_name: str, company: str = None) -> list[Conta
 # Whitepages Pro — phone lookup
 # ============================================================
 
+@retry_external(max_attempts=3)
+async def _fetch_whitepages_person(client: httpx.AsyncClient, params: dict, k: str) -> list:
+    """Inner HTTP helper for Whitepages Pro person search — retried on transient errors."""
+    r = await client.get(
+        "https://api.whitepages.com/v2/person",
+        params=params,
+        headers={"X-Api-Key": k},
+        timeout=30.0,
+    )
+    r.raise_for_status()
+    return r.json() or []
+
+
 async def whitepages_person_search(full_name: str, city: str = "New York") -> list[ContactHit]:
     """
     Whitepages Pro Person Search — GET /v2/person
@@ -185,15 +223,9 @@ async def whitepages_person_search(full_name: str, city: str = "New York") -> li
         "state_code": "NY",
         "include_fuzzy_matching": "true",
     }
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient() as client:
         try:
-            r = await client.get(
-                "https://api.whitepages.com/v2/person",
-                params=params,
-                headers={"X-Api-Key": k},
-            )
-            r.raise_for_status()
-            records = r.json() or []
+            records = await _fetch_whitepages_person(client, params, k)
         except httpx.HTTPStatusError as e:
             log.warn("whitepages.http_error",
                      status=e.response.status_code, body=e.response.text[:200])
@@ -267,6 +299,19 @@ async def whitepages_person_search(full_name: str, city: str = "New York") -> li
 # Proxycurl — LinkedIn profile
 # ============================================================
 
+@retry_external(max_attempts=3)
+async def _fetch_proxycurl_person(client: httpx.AsyncClient, params: dict, k: str) -> dict:
+    """Inner HTTP helper for Proxycurl LinkedIn profile resolve — retried on transient errors."""
+    r = await client.get(
+        "https://nubela.co/proxycurl/api/linkedin/profile/resolve",
+        params=params,
+        headers={"Authorization": f"Bearer {k}"},
+        timeout=30.0,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
 async def proxycurl_person_lookup(
     first_name: str, last_name: str, company_name: str = None,
 ) -> list[ContactHit]:
@@ -274,16 +319,12 @@ async def proxycurl_person_lookup(
     if not k:
         log.debug("proxycurl.skipped", name=f"{first_name} {last_name}")
         return []
-    url = "https://nubela.co/proxycurl/api/linkedin/profile/resolve"
     params = {"first_name": first_name, "last_name": last_name}
     if company_name:
         params["company_domain"] = company_name
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient() as client:
         try:
-            r = await client.get(url, params=params,
-                                 headers={"Authorization": f"Bearer {k}"})
-            r.raise_for_status()
-            data = r.json()
+            data = await _fetch_proxycurl_person(client, params, k)
         except Exception as e:
             log.warn("proxycurl.failed", error=str(e))
             return []

@@ -16,6 +16,7 @@ import httpx
 import structlog
 
 from config import config
+from database.retry import retry_external
 from ..models import ContactHit, CompanyHit
 from ..filters import is_govt_entity
 
@@ -33,6 +34,14 @@ def _headers() -> dict:
     return h
 
 
+@retry_external(max_attempts=5)
+async def _fetch_acris_parties_by_name(client: httpx.AsyncClient, where: str, limit: int) -> list[dict]:
+    """Inner HTTP helper for ACRIS party name search — retried on transient errors."""
+    r = await client.get(ACRIS_PARTIES_URL, headers=_headers(), params={"$where": where, "$limit": limit})
+    r.raise_for_status()
+    return r.json()
+
+
 async def find_deals_by_party(full_name: str, limit: int = 50) -> list[dict]:
     """
     Search ACRIS Parties for this name. Returns raw rows with document_id,
@@ -42,12 +51,9 @@ async def find_deals_by_party(full_name: str, limit: int = 50) -> list[dict]:
         return []
     # ACRIS stores names upper-cased; match case-insensitively.
     where = f"upper(name) like '%{full_name.upper().replace(chr(39), '')}%'"
-    params = {"$where": where, "$limit": limit}
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            r = await client.get(ACRIS_PARTIES_URL, headers=_headers(), params=params)
-            r.raise_for_status()
-            rows = r.json()
+            rows = await _fetch_acris_parties_by_name(client, where, limit)
         except Exception as e:
             log.warn("acris_party_history.query_failed", name=full_name, error=str(e))
             return []
@@ -69,12 +75,9 @@ async def co_owners_on_other_deals(
         return []
 
     where = "document_id in ('" + "','".join(doc_ids) + "')"
-    params = {"$where": where, "$limit": 500}
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            r = await client.get(ACRIS_PARTIES_URL, headers=_headers(), params=params)
-            r.raise_for_status()
-            all_parties = r.json()
+            all_parties = await _fetch_acris_parties_by_name(client, where, 500)
         except Exception as e:
             log.warn("acris_party_history.co_query_failed", error=str(e))
             return []

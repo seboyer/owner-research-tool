@@ -20,10 +20,10 @@ from typing import Optional
 
 import httpx
 import structlog
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config import config
 from database.client import db, upsert_entity, upsert_relationship, update_entity
+from database.retry import retry_external
 
 log = structlog.get_logger(__name__)
 
@@ -40,7 +40,6 @@ class OpenCorporatesClient:
     async def __aenter__(self):
         self._client = httpx.AsyncClient(
             headers={"User-Agent": "NYC-Landlord-Finder/1.0"},
-            timeout=20,
         )
         return self
 
@@ -56,7 +55,7 @@ class OpenCorporatesClient:
             p.update(extra)
         return p
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry_external(max_attempts=3)
     async def search_company(self, name: str, jurisdiction: str = NY_JURISDICTION) -> list[dict]:
         """Search for a company by name in a given jurisdiction."""
         params = self._params({
@@ -65,26 +64,28 @@ class OpenCorporatesClient:
             "per_page": 10,
             "order": "score",
         })
-        resp = await self._client.get(f"{self.BASE_URL}/companies/search", params=params)
+        resp = await self._client.get(f"{self.BASE_URL}/companies/search", params=params,
+                                      timeout=30.0)
         resp.raise_for_status()
         data = resp.json()
         companies = data.get("results", {}).get("companies", [])
         return [c["company"] for c in companies]
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry_external(max_attempts=3)
     async def get_company(self, jurisdiction: str, company_number: str) -> dict | None:
         """Fetch full details for a specific company."""
         params = self._params()
         resp = await self._client.get(
             f"{self.BASE_URL}/companies/{jurisdiction}/{company_number}",
             params=params,
+            timeout=30.0,
         )
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
         return resp.json().get("results", {}).get("company")
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry_external(max_attempts=3)
     async def search_by_registered_agent(self, agent_name: str, jurisdiction: str = NY_JURISDICTION) -> list[dict]:
         """
         Find all companies that share a registered agent.
@@ -96,7 +97,8 @@ class OpenCorporatesClient:
             "jurisdiction_code": jurisdiction,
             "per_page": 50,
         })
-        resp = await self._client.get(f"{self.BASE_URL}/companies/search", params=params)
+        resp = await self._client.get(f"{self.BASE_URL}/companies/search", params=params,
+                                      timeout=30.0)
         resp.raise_for_status()
         companies = resp.json().get("results", {}).get("companies", [])
         return [c["company"] for c in companies]
@@ -238,7 +240,7 @@ async def scrape_nys_dos(entity_name: str) -> dict | None:
     async with httpx.AsyncClient(
         headers={"User-Agent": "Mozilla/5.0 (compatible; NYC-Landlord-Finder/1.0)"},
         follow_redirects=True,
-        timeout=20,
+        timeout=30.0,
     ) as client:
         try:
             # First GET to get the form/session
