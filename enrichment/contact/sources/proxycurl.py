@@ -10,9 +10,20 @@ import httpx
 import structlog
 
 from config import config
+from database.retry import retry_external
 from ..models import ContactHit
 
 log = structlog.get_logger(__name__)
+
+
+@retry_external(max_attempts=3)
+async def _resolve_profile(params: dict, api_key: str) -> dict:
+    url = "https://nubela.co/proxycurl/api/linkedin/profile/resolve"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.get(url, params=params,
+                             headers={"Authorization": f"Bearer {api_key}"})
+        r.raise_for_status()
+        return r.json()
 
 
 async def proxycurl_person_lookup(
@@ -22,19 +33,14 @@ async def proxycurl_person_lookup(
     if not k:
         log.debug("proxycurl.skipped", name=f"{first_name} {last_name}")
         return []
-    url = "https://nubela.co/proxycurl/api/linkedin/profile/resolve"
     params = {"first_name": first_name, "last_name": last_name}
     if company_name:
         params["company_domain"] = company_name
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            r = await client.get(url, params=params,
-                                 headers={"Authorization": f"Bearer {k}"})
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            log.warn("proxycurl.failed", error=str(e))
-            return []
+    try:
+        data = await _resolve_profile(params, k)
+    except Exception as e:
+        log.warning("proxycurl.failed", error=str(e))
+        return []
     if not data.get("url"):
         return []
     return [ContactHit(

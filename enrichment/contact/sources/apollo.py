@@ -10,9 +10,22 @@ import httpx
 import structlog
 
 from config import config
+from database.retry import retry_external
 from ..models import ContactHit
 
 log = structlog.get_logger(__name__)
+
+
+@retry_external(max_attempts=3)
+async def _post_people_match(payload: dict, api_key: str) -> dict:
+    url = "https://api.apollo.io/v1/people/match"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(
+            url, json=payload,
+            headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
+        )
+        r.raise_for_status()
+        return r.json().get("person", {})
 
 
 async def apollo_person_match(full_name: str, company: str = None) -> list[ContactHit]:
@@ -20,22 +33,14 @@ async def apollo_person_match(full_name: str, company: str = None) -> list[Conta
     if not k:
         log.debug("apollo.skipped", name=full_name)
         return []
-    url = "https://api.apollo.io/v1/people/match"
     payload = {"name": full_name}
     if company:
         payload["organization_name"] = company
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            r = await client.post(
-                url,
-                json=payload,
-                headers={"X-Api-Key": k, "Content-Type": "application/json"},
-            )
-            r.raise_for_status()
-            p = r.json().get("person", {})
-        except Exception as e:
-            log.warn("apollo.failed", error=str(e))
-            return []
+    try:
+        p = await _post_people_match(payload, k)
+    except Exception as e:
+        log.warning("apollo.failed", error=str(e))
+        return []
     if not p:
         return []
     return [ContactHit(

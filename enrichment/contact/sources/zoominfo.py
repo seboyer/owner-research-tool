@@ -20,5 +20,5 @@ async def zoominfo_person_at_company(full_name: str, company: str) -> list[Conta
     except ImportError:
         return []
     except Exception as e:
-        log.warn("zoominfo.failed", error=str(e))
+        log.warning("zoominfo.failed", error=str(e))
         return []

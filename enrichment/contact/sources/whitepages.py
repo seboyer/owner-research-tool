@@ -12,9 +12,21 @@ import httpx
 import structlog
 
 from config import config
+from database.retry import retry_external
 from ..models import ContactHit
 
 log = structlog.get_logger(__name__)
+
+
+@retry_external(max_attempts=3)
+async def _person_search(params: dict, api_key: str) -> list:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.get(
+            "https://api.whitepages.com/v2/person",
+            params=params, headers={"X-Api-Key": api_key},
+        )
+        r.raise_for_status()
+        return r.json() or []
 
 
 async def whitepages_person_search(full_name: str, city: str = "New York") -> list[ContactHit]:
@@ -39,29 +51,22 @@ async def whitepages_person_search(full_name: str, city: str = "New York") -> li
         "state_code": "NY",
         "include_fuzzy_matching": "true",
     }
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            r = await client.get(
-                "https://api.whitepages.com/v2/person",
-                params=params,
-                headers={"X-Api-Key": k},
-            )
-            r.raise_for_status()
-            records = r.json() or []
-        except httpx.HTTPStatusError as e:
-            log.warn("whitepages.http_error",
-                     status=e.response.status_code, body=e.response.text[:200])
-            return []
-        except Exception as e:
-            log.warn("whitepages.failed", error=str(e))
-            return []
+    try:
+        records = await _person_search(params, k)
+    except httpx.HTTPStatusError as e:
+        log.warning("whitepages.http_error",
+                 status=e.response.status_code, body=e.response.text[:200])
+        return []
+    except Exception as e:
+        log.warning("whitepages.failed", error=str(e))
+        return []
 
     if not records:
         return []
 
     # Whitepages should return a list; guard against dict error responses
     if not isinstance(records, list):
-        log.warn("whitepages.unexpected_response_type",
+        log.warning("whitepages.unexpected_response_type",
                  type=type(records).__name__, body=str(records)[:300])
         return []
 

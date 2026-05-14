@@ -10,9 +10,33 @@ import httpx
 import structlog
 
 from config import config
+from database.retry import retry_external
 from ..models import CompanyHit
 
 log = structlog.get_logger(__name__)
+
+
+@retry_external(max_attempts=3)
+async def _findplace(client: httpx.AsyncClient, query: str, api_key: str) -> list[dict]:
+    find_url = "https://maps.googleapis.com/maps/api/place/findplacefromtext/json"
+    r = await client.get(find_url, params={
+        "input": query, "inputtype": "textquery",
+        "fields": "place_id,name,formatted_address", "key": api_key,
+    })
+    r.raise_for_status()
+    return r.json().get("candidates", [])
+
+
+@retry_external(max_attempts=3)
+async def _details(client: httpx.AsyncClient, place_id: str, api_key: str) -> dict:
+    details_url = "https://maps.googleapis.com/maps/api/place/details/json"
+    r = await client.get(details_url, params={
+        "place_id": place_id,
+        "fields": "name,formatted_phone_number,website,formatted_address",
+        "key": api_key,
+    })
+    r.raise_for_status()
+    return r.json().get("result", {})
 
 
 async def google_places_find_company(name: str, city: str = "New York, NY") -> list[CompanyHit]:
@@ -20,32 +44,15 @@ async def google_places_find_company(name: str, city: str = "New York, NY") -> l
     if not k:
         log.debug("google_places.skipped", name=name)
         return []
-    # Places "findplacefromtext" -> details
-    find_url = "https://maps.googleapis.com/maps/api/place/findplacefromtext/json"
-    details_url = "https://maps.googleapis.com/maps/api/place/details/json"
-    async with httpx.AsyncClient(timeout=20) as client:
-        try:
-            r = await client.get(find_url, params={
-                "input": f"{name} {city}",
-                "inputtype": "textquery",
-                "fields": "place_id,name,formatted_address",
-                "key": k,
-            })
-            r.raise_for_status()
-            cands = r.json().get("candidates", [])
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            cands = await _findplace(client, f"{name} {city}", k)
             if not cands:
                 return []
-            pid = cands[0]["place_id"]
-            r2 = await client.get(details_url, params={
-                "place_id": pid,
-                "fields": "name,formatted_phone_number,website,formatted_address",
-                "key": k,
-            })
-            r2.raise_for_status()
-            res = r2.json().get("result", {})
-        except Exception as e:
-            log.warn("google_places.failed", error=str(e))
-            return []
+            res = await _details(client, cands[0]["place_id"], k)
+    except Exception as e:
+        log.warning("google_places.failed", error=str(e))
+        return []
     return [CompanyHit(
         name=res.get("name") or name,
         role_category="owner_operating",
