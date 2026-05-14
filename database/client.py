@@ -184,7 +184,7 @@ def upsert_entity(name: str, entity_type: str, extra: dict = None) -> str:
 
     # Queue for enrichment if it's a new entity
     queue_for_enrichment(entity_id, enrichment_type="both")
-    log.info("entity.created", name=name, entity_type=entity_type, id=entity_id)
+    log.info("entity.created", entity=name, entity_type=entity_type, id=entity_id)
     return entity_id
 
 

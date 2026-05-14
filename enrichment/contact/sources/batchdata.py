@@ -133,11 +133,11 @@ async def skip_trace_property(
             r.raise_for_status()
             data = r.json()
         except httpx.HTTPStatusError as e:
-            log.warn("batchdata.skip_trace.http_error",
+            log.warning("batchdata.skip_trace.http_error",
                      status=e.response.status_code, body=e.response.text[:200])
             return []
         except Exception as e:
-            log.warn("batchdata.skip_trace.failed", error=str(e))
+            log.warning("batchdata.skip_trace.failed", error=str(e))
             return []
 
     result_items = (data.get("result", {}).get("data") or [])

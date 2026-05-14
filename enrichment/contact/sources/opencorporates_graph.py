@@ -38,7 +38,7 @@ async def companies_for_person(full_name: str) -> list[CompanyHit]:
             r.raise_for_status()
             officers = r.json().get("results", {}).get("officers", [])
         except Exception as e:
-            log.warn("oc.officers_search_failed", name=full_name, error=str(e))
+            log.warning("oc.officers_search_failed", entity=full_name, error=str(e))
             return []
 
     hits: list[CompanyHit] = []
@@ -82,7 +82,7 @@ async def co_officers_for_company(opencorporates_url: str, exclude_name: str) ->
             r.raise_for_status()
             co = r.json().get("results", {}).get("company", {})
         except Exception as e:
-            log.warn("oc.company_fetch_failed", url=url, error=str(e))
+            log.warning("oc.company_fetch_failed", url=url, error=str(e))
             return []
     officers = co.get("officers", []) or []
     out: list[ContactHit] = []
