@@ -16,6 +16,7 @@ import structlog
 
 from config import config
 from database.client import parse_bbl
+from database.retry import retry_external
 from ..models import ContactHit
 
 log = structlog.get_logger(__name__)
@@ -46,6 +47,26 @@ _ROLE_MAP = {
 }
 
 
+@retry_external(max_attempts=5)
+async def _fetch_hpd_registrations(client: httpx.AsyncClient, where: str) -> list[dict]:
+    """Inner HTTP helper for HPD registrations by BBL — retried on transient errors."""
+    reg = await client.get(HPD_REG_URL, headers=_headers(),
+                           params={"$where": where, "$limit": 50})
+    reg.raise_for_status()
+    return reg.json()
+
+
+@retry_external(max_attempts=5)
+async def _fetch_hpd_contacts_for_regs(client: httpx.AsyncClient, reg_ids: list[str]) -> list[dict]:
+    """Inner HTTP helper for HPD contacts by registration IDs — retried on transient errors."""
+    cts = await client.get(HPD_CONTACTS_URL, headers=_headers(), params={
+        "$where": "registrationid in (" + ",".join(f"'{r}'" for r in reg_ids) + ")",
+        "$limit": 500,
+    })
+    cts.raise_for_status()
+    return cts.json()
+
+
 async def contacts_for_bbl(bbl: str) -> list[ContactHit]:
     """Return every HPD contact row for this BBL."""
     parsed = parse_bbl(bbl)
@@ -54,12 +75,9 @@ async def contacts_for_bbl(bbl: str) -> list[ContactHit]:
     boro, block, lot = parsed
     where = f"boroid='{boro}' AND block='{block}' AND lot='{lot}'"
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            reg = await client.get(HPD_REG_URL, headers=_headers(),
-                                   params={"$where": where, "$limit": 50})
-            reg.raise_for_status()
-            regs = reg.json()
+            regs = await _fetch_hpd_registrations(client, where)
         except Exception as e:
             log.warning("hpd.reg_query_failed", bbl=bbl, error=str(e))
             return []
@@ -71,12 +89,7 @@ async def contacts_for_bbl(bbl: str) -> list[ContactHit]:
             return []
 
         try:
-            cts = await client.get(HPD_CONTACTS_URL, headers=_headers(), params={
-                "$where": "registrationid in (" + ",".join(f"'{r}'" for r in reg_ids) + ")",
-                "$limit": 500,
-            })
-            cts.raise_for_status()
-            rows = cts.json()
+            rows = await _fetch_hpd_contacts_for_regs(client, reg_ids)
         except Exception as e:
             log.warning("hpd.contacts_query_failed", bbl=bbl, error=str(e))
             return []

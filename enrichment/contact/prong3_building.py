@@ -184,6 +184,7 @@ async def _acris_parties_for_bbl(bbl: str, exclude_name: str) -> list[ContactHit
     """Look up every ACRIS party ever tied to this BBL (via Legals dataset)."""
     import httpx
     from config import config
+    from database.retry import retry_external as _retry_external
     url_legals = config.ACRIS_LEGALS_URL
     url_parties = config.ACRIS_PARTIES_URL
     headers = {"Accept": "application/json"}
@@ -195,13 +196,27 @@ async def _acris_parties_for_bbl(bbl: str, exclude_name: str) -> list[ContactHit
     if parsed is None:
         return []
     boro, block, lot = parsed
-    async with httpx.AsyncClient(timeout=30) as client:
+
+    @_retry_external(max_attempts=5)
+    async def _fetch_legals(client: httpx.AsyncClient) -> list[dict]:
+        legals = await client.get(url_legals, headers=headers, params={
+            "borough": boro, "block": block, "lot": lot, "$limit": 200,
+        })
+        legals.raise_for_status()
+        return legals.json()
+
+    @_retry_external(max_attempts=5)
+    async def _fetch_parties(client: httpx.AsyncClient, doc_ids: list) -> list[dict]:
+        r = await client.get(url_parties, headers=headers, params={
+            "$where": "document_id in ('" + "','".join(doc_ids) + "')",
+            "$limit": 500,
+        })
+        r.raise_for_status()
+        return r.json()
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            legals = await client.get(url_legals, headers=headers, params={
-                "borough": boro, "block": block, "lot": lot, "$limit": 200,
-            })
-            legals.raise_for_status()
-            docs = legals.json()
+            docs = await _fetch_legals(client)
         except Exception as e:
             log.warning("acris_bbl_history.legals_failed", error=str(e))
             return []
@@ -211,12 +226,7 @@ async def _acris_parties_for_bbl(bbl: str, exclude_name: str) -> list[ContactHit
         if not doc_ids:
             return []
         try:
-            r = await client.get(url_parties, headers=headers, params={
-                "$where": "document_id in ('" + "','".join(doc_ids) + "')",
-                "$limit": 500,
-            })
-            r.raise_for_status()
-            parties = r.json()
+            parties = await _fetch_parties(client, doc_ids)
         except Exception as e:
             log.warning("acris_bbl_history.parties_failed", error=str(e))
             return []

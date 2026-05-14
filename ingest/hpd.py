@@ -25,6 +25,7 @@ from database.client import (
     upsert_property, upsert_entity, upsert_contact,
     upsert_property_role, start_ingestion_log, finish_ingestion_log,
 )
+from database.retry import retry_external
 
 log = structlog.get_logger(__name__)
 
@@ -54,6 +55,7 @@ ROLE_MAP = {
 SOCRATA_PAGE_SIZE = 5000
 
 
+@retry_external(max_attempts=5)
 async def _fetch_page(client: httpx.AsyncClient, url: str, offset: int, where: str = None) -> list[dict]:
     """Fetch a single paginated page from the Socrata API."""
     params = {
@@ -66,16 +68,9 @@ async def _fetch_page(client: httpx.AsyncClient, url: str, offset: int, where: s
     if config.NYC_OPENDATA_APP_TOKEN:
         params["$$app_token"] = config.NYC_OPENDATA_APP_TOKEN
 
-    for attempt in range(3):
-        try:
-            resp = await client.get(url, params=params, timeout=30)
-            resp.raise_for_status()
-            return resp.json()
-        except Exception as e:
-            if attempt == 2:
-                raise
-            await asyncio.sleep(2 ** attempt)
-    return []
+    resp = await client.get(url, params=params, timeout=30.0)
+    resp.raise_for_status()
+    return resp.json()
 
 
 async def paginate(url: str, where: str = None) -> AsyncIterator[dict]:

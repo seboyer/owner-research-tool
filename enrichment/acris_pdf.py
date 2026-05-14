@@ -35,6 +35,7 @@ from database.client import (
     db, parse_bbl, upsert_entity, upsert_contact, upsert_relationship,
     already_seen, mark_seen,
 )
+from database.retry import retry_external
 
 log = structlog.get_logger(__name__)
 
@@ -50,6 +51,22 @@ anthropic_client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
 # ============================================================
 # Step 1: Find mortgage doc IDs for a BBL (via Socrata — no blocking)
 # ============================================================
+
+@retry_external(max_attempts=5)
+async def _fetch_acris_legals_for_bbl(client: httpx.AsyncClient, params: dict) -> list[dict]:
+    """Inner HTTP helper for ACRIS legals by BBL — retried on transient errors."""
+    resp = await client.get(config.ACRIS_LEGALS_URL, params=params, timeout=30.0)
+    resp.raise_for_status()
+    return resp.json()
+
+
+@retry_external(max_attempts=5)
+async def _fetch_acris_masters_for_docs(client: httpx.AsyncClient, params: dict) -> list[dict]:
+    """Inner HTTP helper for ACRIS masters by doc IDs — retried on transient errors."""
+    resp = await client.get(ACRIS_MASTER_URL, params=params, timeout=30.0)
+    resp.raise_for_status()
+    return resp.json()
+
 
 async def get_mortgage_docs_for_bbl(bbl: str) -> list[dict]:
     """
@@ -71,9 +88,7 @@ async def get_mortgage_docs_for_bbl(bbl: str) -> list[dict]:
         if config.NYC_OPENDATA_APP_TOKEN:
             params["$$app_token"] = config.NYC_OPENDATA_APP_TOKEN
 
-        resp = await client.get(config.ACRIS_LEGALS_URL, params=params, timeout=20)
-        resp.raise_for_status()
-        legals = resp.json()
+        legals = await _fetch_acris_legals_for_bbl(client, params)
 
     if not legals:
         return []
@@ -93,9 +108,7 @@ async def get_mortgage_docs_for_bbl(bbl: str) -> list[dict]:
         if config.NYC_OPENDATA_APP_TOKEN:
             params["$$app_token"] = config.NYC_OPENDATA_APP_TOKEN
 
-        resp = await client.get(ACRIS_MASTER_URL, params=params, timeout=20)
-        resp.raise_for_status()
-        docs = resp.json()
+        docs = await _fetch_acris_masters_for_docs(client, params)
 
     return docs
 
@@ -111,6 +124,22 @@ def _is_valid_tiff(data: bytes) -> bool:
     return len(data) > 4 and data[:4] in (b"II*\x00", b"MM\x00*")
 
 
+@retry_external(max_attempts=3, max_delay=60.0)
+async def _fetch_tiff_page(client: httpx.AsyncClient, url: str) -> httpx.Response:
+    """Inner HTTP helper for a single ACRIS TIFF page — retried on transient errors.
+
+    NOTE: Non-200 and non-TIFF responses are NOT retried — the outer loop uses
+    those as end-of-document signals (not errors). Only genuine transient failures
+    (timeouts, 5xx, network errors) are retried here.
+    """
+    resp = await client.get(url)
+    # Only raise for server errors so retry_external sees them.
+    # status 200 with blank placeholder is handled by the caller.
+    if resp.status_code >= 500:
+        resp.raise_for_status()
+    return resp
+
+
 async def _fetch_tiff_pages(document_id: str) -> list[bytes]:
     """
     Fetch all real TIFF pages for a document using direct httpx requests.
@@ -124,12 +153,12 @@ async def _fetch_tiff_pages(document_id: str) -> list[bytes]:
     async with httpx.AsyncClient(
         follow_redirects=True,
         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0"},
-        timeout=30,
+        timeout=30.0,
     ) as client:
         for page_num in range(1, MAX_PAGES + 1):
             url = f"{ACRIS_GET_IMAGE_URL}?doc_id={document_id}&page={page_num}"
             try:
-                resp = await client.get(url)
+                resp = await _fetch_tiff_page(client, url)
                 if resp.status_code != 200 or not _is_valid_tiff(resp.content):
                     break
                 curr_hash = hashlib.md5(resp.content).hexdigest()

@@ -34,6 +34,7 @@ from database.client import (
     start_ingestion_log, finish_ingestion_log,
     get_enrichment_batch, mark_enrichment_done, mark_enrichment_failed,
 )
+from database.retry import retry_external
 
 log = structlog.get_logger(__name__)
 anthropic = Anthropic(api_key=config.ANTHROPIC_API_KEY)
@@ -169,6 +170,18 @@ async def enrich_via_ai_web_search(
 # Docs: https://pro.whitepages.com/developer/documentation/
 # ============================================================
 
+@retry_external(max_attempts=3)
+async def _fetch_whitepages(client: httpx.AsyncClient, full_name: str, city: str, state: str, api_key: str) -> httpx.Response:
+    """Inner HTTP helper for Whitepages Pro person lookup — retried on transient errors."""
+    resp = await client.get(
+        "https://proapi.whitepages.com/3.0/person",
+        params={"name": full_name, "city": city, "state_code": state, "api_key": api_key},
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    return resp
+
+
 async def enrich_via_whitepages(
     entity_id: str,
     full_name: str,
@@ -187,17 +200,7 @@ async def enrich_via_whitepages(
 
     async with httpx.AsyncClient() as client:
         try:
-            resp = await client.get(
-                "https://proapi.whitepages.com/3.0/person",
-                params={
-                    "name": full_name,
-                    "city": city,
-                    "state_code": state,
-                    "api_key": api_key,
-                },
-                timeout=10,
-            )
-            resp.raise_for_status()
+            resp = await _fetch_whitepages(client, full_name, city, state, api_key)
             data = resp.json()
 
             people = data.get("results", [])
@@ -235,6 +238,19 @@ async def enrich_via_whitepages(
 # Docs: https://www.propertyradar.com/api
 # ============================================================
 
+@retry_external(max_attempts=3)
+async def _fetch_propertyradar(client: httpx.AsyncClient, entity_name: str, api_key: str) -> httpx.Response:
+    """Inner HTTP helper for PropertyRadar owner lookup — retried on transient errors."""
+    resp = await client.get(
+        "https://api.propertyradar.com/v1/properties",
+        params={"ownerName": entity_name, "state": "NY", "county": "New York"},
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    return resp
+
+
 async def enrich_via_propertyradar(
     entity_id: str,
     entity_name: str,
@@ -255,17 +271,7 @@ async def enrich_via_propertyradar(
     async with httpx.AsyncClient() as client:
         try:
             # Search by owner name
-            resp = await client.get(
-                "https://api.propertyradar.com/v1/properties",
-                params={
-                    "ownerName": entity_name,
-                    "state": "NY",
-                    "county": "New York",
-                },
-                headers={"Authorization": f"Bearer {api_key}"},
-                timeout=15,
-            )
-            resp.raise_for_status()
+            resp = await _fetch_propertyradar(client, entity_name, api_key)
             data = resp.json()
             properties = data.get("results", [])
 
@@ -307,6 +313,39 @@ async def enrich_via_propertyradar(
 # Best for: professional property managers, real estate firms
 # ============================================================
 
+@retry_external(max_attempts=3)
+async def _fetch_google_places_search(client: httpx.AsyncClient, entity_name: str, api_key: str) -> httpx.Response:
+    """Inner HTTP helper for Google Places text search — retried on transient errors."""
+    resp = await client.get(
+        "https://maps.googleapis.com/maps/api/place/textsearch/json",
+        params={
+            "query": f"{entity_name} NYC real estate",
+            "location": "40.7128,-74.0060",
+            "radius": 50000,
+            "key": api_key,
+        },
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    return resp
+
+
+@retry_external(max_attempts=3)
+async def _fetch_google_places_details(client: httpx.AsyncClient, place_id: str, api_key: str) -> httpx.Response:
+    """Inner HTTP helper for Google Places details — retried on transient errors."""
+    resp = await client.get(
+        "https://maps.googleapis.com/maps/api/place/details/json",
+        params={
+            "place_id": place_id,
+            "fields": "name,formatted_phone_number,website,formatted_address",
+            "key": api_key,
+        },
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    return resp
+
+
 async def enrich_via_google_places(
     entity_id: str,
     entity_name: str,
@@ -324,17 +363,7 @@ async def enrich_via_google_places(
     async with httpx.AsyncClient() as client:
         try:
             # Text search
-            resp = await client.get(
-                "https://maps.googleapis.com/maps/api/place/textsearch/json",
-                params={
-                    "query": f"{entity_name} NYC real estate",
-                    "location": "40.7128,-74.0060",  # NYC lat/lng
-                    "radius": 50000,
-                    "key": api_key,
-                },
-                timeout=10,
-            )
-            resp.raise_for_status()
+            resp = await _fetch_google_places_search(client, entity_name, api_key)
             data = resp.json()
             places = data.get("results", [])
 
@@ -345,16 +374,7 @@ async def enrich_via_google_places(
             place_id = place.get("place_id")
 
             # Get details
-            details_resp = await client.get(
-                "https://maps.googleapis.com/maps/api/place/details/json",
-                params={
-                    "place_id": place_id,
-                    "fields": "name,formatted_phone_number,website,formatted_address",
-                    "key": api_key,
-                },
-                timeout=10,
-            )
-            details_resp.raise_for_status()
+            details_resp = await _fetch_google_places_details(client, place_id, api_key)
             details = details_resp.json().get("result", {})
 
             phone = details.get("formatted_phone_number")
@@ -385,6 +405,18 @@ async def enrich_via_google_places(
 # Works for: any entity with a known website domain
 # ============================================================
 
+@retry_external(max_attempts=3)
+async def _fetch_hunter_domain_search(client: httpx.AsyncClient, domain: str, entity_name: str, api_key: str) -> httpx.Response:
+    """Inner HTTP helper for Hunter.io domain search — retried on transient errors."""
+    resp = await client.get(
+        "https://api.hunter.io/v2/domain-search",
+        params={"domain": domain, "company": entity_name, "limit": 5, "api_key": api_key},
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    return resp
+
+
 async def enrich_via_hunter(
     entity_id: str,
     entity_name: str,
@@ -400,17 +432,7 @@ async def enrich_via_hunter(
 
     async with httpx.AsyncClient() as client:
         try:
-            resp = await client.get(
-                "https://api.hunter.io/v2/domain-search",
-                params={
-                    "domain": domain,
-                    "company": entity_name,
-                    "limit": 5,
-                    "api_key": api_key,
-                },
-                timeout=10,
-            )
-            resp.raise_for_status()
+            resp = await _fetch_hunter_domain_search(client, domain, entity_name, api_key)
             data = resp.json().get("data", {})
             emails = data.get("emails", [])
 
@@ -450,6 +472,39 @@ async def enrich_via_hunter(
 # Works for: individuals with a LinkedIn presence
 # ============================================================
 
+@retry_external(max_attempts=3)
+async def _fetch_proxycurl_resolve(client: httpx.AsyncClient, first_name: str, last_name: str, api_key: str) -> httpx.Response:
+    """Inner HTTP helper for Proxycurl LinkedIn profile resolve — retried on transient errors."""
+    resp = await client.get(
+        "https://nubela.co/proxycurl/api/linkedin/profile/resolve",
+        params={
+            "first_name": first_name,
+            "last_name": last_name,
+            "company_domain": "",
+            "location": "New York, New York, United States",
+            "title": "real estate",
+            "similarity_checks": "include",
+        },
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    return resp
+
+
+@retry_external(max_attempts=3)
+async def _fetch_proxycurl_profile(client: httpx.AsyncClient, linkedin_url: str, api_key: str) -> httpx.Response:
+    """Inner HTTP helper for Proxycurl LinkedIn profile details — retried on transient errors."""
+    resp = await client.get(
+        "https://nubela.co/proxycurl/api/v2/linkedin",
+        params={"url": linkedin_url, "personal_email": "include", "personal_contact_number": "include"},
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    return resp
+
+
 async def enrich_via_proxycurl(
     entity_id: str,
     full_name: str,
@@ -466,21 +521,10 @@ async def enrich_via_proxycurl(
 
     async with httpx.AsyncClient() as client:
         try:
+            first_name = full_name.split(" ")[0]
+            last_name = full_name.split(" ")[-1] if " " in full_name else ""
             # Person search
-            resp = await client.get(
-                "https://nubela.co/proxycurl/api/linkedin/profile/resolve",
-                params={
-                    "first_name": full_name.split(" ")[0],
-                    "last_name": full_name.split(" ")[-1] if " " in full_name else "",
-                    "company_domain": "",
-                    "location": "New York, New York, United States",
-                    "title": "real estate",
-                    "similarity_checks": "include",
-                },
-                headers={"Authorization": f"Bearer {api_key}"},
-                timeout=15,
-            )
-            resp.raise_for_status()
+            resp = await _fetch_proxycurl_resolve(client, first_name, last_name, api_key)
             data = resp.json()
             linkedin_url = data.get("url")
 
@@ -488,16 +532,7 @@ async def enrich_via_proxycurl(
                 return False
 
             # Now get the profile details
-            profile_resp = await client.get(
-                "https://nubela.co/proxycurl/api/v2/linkedin",
-                params={
-                    "url": linkedin_url,
-                    "personal_email": "include",
-                    "personal_contact_number": "include",
-                },
-                headers={"Authorization": f"Bearer {api_key}"},
-                timeout=15,
-            )
+            profile_resp = await _fetch_proxycurl_profile(client, linkedin_url, api_key)
             profile = profile_resp.json()
 
             emails = profile.get("personal_emails", [])
