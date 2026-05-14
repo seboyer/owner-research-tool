@@ -118,29 +118,31 @@ CREATE INDEX IF NOT EXISTS idx_property_roles_current  ON property_roles(is_curr
 -- People associated with an entity (from HPD, Zoominfo, web)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS contacts (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    entity_id       UUID REFERENCES entities(id) ON DELETE CASCADE,
-    first_name      TEXT,
-    last_name       TEXT,
-    full_name       TEXT,
-    title           TEXT,
-    email           TEXT,
-    email_verified  BOOLEAN DEFAULT FALSE,
-    phone           TEXT,
-    phone_type      TEXT,  -- 'direct', 'mobile', 'office', 'hq'
-    linkedin_url    TEXT,
-    source          TEXT,  -- 'hpd', 'zoominfo', 'web_scrape', 'opencorporates'
-    confidence      FLOAT DEFAULT 0.5,
-    is_primary      BOOLEAN DEFAULT FALSE,
-    zoominfo_id     TEXT,
-    raw_data        JSONB,
-    created_at      TIMESTAMPTZ DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    entity_id               UUID REFERENCES entities(id) ON DELETE CASCADE,
+    first_name              TEXT,
+    last_name               TEXT,
+    full_name               TEXT,
+    title                   TEXT,
+    email                   TEXT,
+    email_verified          BOOLEAN DEFAULT FALSE,
+    phone                   TEXT,
+    phone_type              TEXT,  -- 'direct', 'mobile', 'office', 'hq'
+    linkedin_url            TEXT,
+    source                  TEXT,  -- 'hpd', 'zoominfo', 'web_scrape', 'acris_pdf'
+    confidence              FLOAT DEFAULT 0.5,
+    is_primary              BOOLEAN DEFAULT FALSE,
+    zoominfo_id             TEXT,
+    enrichment_complete_at  TIMESTAMPTZ,  -- stamped once all 3 prongs have succeeded
+    raw_data                JSONB,
+    created_at              TIMESTAMPTZ DEFAULT NOW(),
+    updated_at              TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(entity_id, email)
 );
 
-CREATE INDEX IF NOT EXISTS idx_contacts_entity ON contacts(entity_id);
-CREATE INDEX IF NOT EXISTS idx_contacts_email  ON contacts(email);
+CREATE INDEX IF NOT EXISTS idx_contacts_entity                  ON contacts(entity_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_email                   ON contacts(email);
+CREATE INDEX IF NOT EXISTS idx_contacts_enrichment_complete_at  ON contacts(enrichment_complete_at);
 
 -- ============================================================
 -- DATA SOURCES SEEN
@@ -178,72 +180,33 @@ CREATE TABLE IF NOT EXISTS ingestion_log (
 
 -- ============================================================
 -- ENRICHMENT QUEUE
--- Entities waiting to be enriched by Zoominfo / AI piercing
+-- Work backlog for the enrichment stages. One row per (entity, type)
+-- — an entity that needs multiple kinds of work has multiple rows.
+-- Each batch processor (llc_piercer, zoominfo, multi_source) pulls
+-- rows of its own enrichment_type, calls mark_enrichment_done /
+-- mark_enrichment_failed when finished.
 -- ============================================================
 CREATE TABLE IF NOT EXISTS enrichment_queue (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    entity_id       UUID REFERENCES entities(id) ON DELETE CASCADE UNIQUE,
+    entity_id       UUID REFERENCES entities(id) ON DELETE CASCADE,
     priority        INTEGER DEFAULT 5,   -- 1 (highest) to 10 (lowest)
-    enrichment_type TEXT,                -- 'zoominfo', 'llc_pierce', 'both'
+    enrichment_type TEXT NOT NULL,       -- 'llc_pierce', 'zoominfo', 'multi_source'
     attempts        INTEGER DEFAULT 0,
     last_attempt_at TIMESTAMPTZ,
     error_message   TEXT,
-    created_at      TIMESTAMPTZ DEFAULT NOW()
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT enrichment_queue_entity_type_unique UNIQUE(entity_id, enrichment_type)
 );
 
-CREATE INDEX IF NOT EXISTS idx_enrich_queue_priority ON enrichment_queue(priority, created_at);
+CREATE INDEX IF NOT EXISTS idx_enrich_queue_priority      ON enrichment_queue(priority, created_at);
+CREATE INDEX IF NOT EXISTS idx_enrich_queue_type_priority ON enrichment_queue(enrichment_type, priority, created_at) WHERE attempts < 3;
 
 -- ============================================================
 -- HELPFUL VIEWS
+-- broker_pitch_list is defined in migrations/002_contact_enrichment.sql.
+-- The earlier landlord_profiles / unpierced_llcs / crm_export views were
+-- dropped in migration 003 (unused).
 -- ============================================================
-
--- Full landlord profile: entity + contact count + property count
-CREATE OR REPLACE VIEW landlord_profiles AS
-SELECT
-    e.id,
-    e.name,
-    e.entity_type,
-    e.is_building_llc,
-    e.is_pierced,
-    e.address,
-    e.portfolio_size,
-    e.enrichment_status,
-    COUNT(DISTINCT pr.property_id) AS linked_properties,
-    COUNT(DISTINCT c.id)           AS contact_count,
-    COUNT(DISTINCT er.parent_entity_id) AS parent_entities
-FROM entities e
-LEFT JOIN property_roles pr ON pr.entity_id = e.id AND pr.is_current = TRUE
-LEFT JOIN contacts c ON c.entity_id = e.id
-LEFT JOIN entity_relationships er ON er.child_entity_id = e.id
-GROUP BY e.id;
-
--- Entities that need LLC piercing (building LLCs not yet resolved)
-CREATE OR REPLACE VIEW unpierced_llcs AS
-SELECT e.*
-FROM entities e
-WHERE e.is_building_llc = TRUE
-  AND e.is_pierced = FALSE
-ORDER BY e.portfolio_size DESC NULLS LAST, e.created_at ASC;
-
--- Contacts ready for CRM import
-CREATE OR REPLACE VIEW crm_export AS
-SELECT
-    c.full_name,
-    c.first_name,
-    c.last_name,
-    c.title,
-    c.email,
-    c.phone,
-    c.source,
-    e.name         AS company_name,
-    e.entity_type  AS company_type,
-    e.address      AS company_address,
-    e.portfolio_size,
-    c.created_at
-FROM contacts c
-JOIN entities e ON e.id = c.entity_id
-WHERE c.email IS NOT NULL OR c.phone IS NOT NULL
-ORDER BY e.portfolio_size DESC NULLS LAST, c.created_at DESC;
 
 -- Auto-update updated_at
 CREATE OR REPLACE FUNCTION update_updated_at()
