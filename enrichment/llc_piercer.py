@@ -26,6 +26,7 @@ from database.client import (
     db, parse_bbl, upsert_entity, upsert_contact, upsert_relationship,
     update_entity, already_seen, mark_seen,
     start_ingestion_log, finish_ingestion_log,
+    get_enrichment_batch, mark_enrichment_done, mark_enrichment_failed,
 )
 from enrichment.acris_pdf import pierce_llc_via_mortgage
 from ingest.whoownswhat import lookup_entity_in_wow
@@ -486,42 +487,34 @@ async def pierce_entity(entity: dict) -> bool:
 
 async def run_batch(batch_size: int = 20):
     """
-    Process a batch of building LLCs that haven't been pierced yet.
-    Prioritize LLCs with larger portfolios (more buildings = bigger landlord).
+    Process a batch of building LLCs from the enrichment queue.
     """
     log_id = start_ingestion_log("llc_piercing")
     stats = {"records_fetched": 0, "records_created": 0, "records_skipped": 0}
-
     try:
-        res = db().table("entities")\
-            .select("*")\
-            .eq("is_building_llc", True)\
-            .eq("is_pierced", False)\
-            .order("portfolio_size", desc=True)\
-            .limit(batch_size)\
-            .execute()
-
-        entities = res.data
-        stats["records_fetched"] = len(entities)
-        log.info("llc_piercer.batch_start", count=len(entities))
-
-        for entity in entities:
+        queue_rows = get_enrichment_batch(enrichment_type="llc_pierce", limit=batch_size)
+        stats["records_fetched"] = len(queue_rows)
+        for row in queue_rows:
+            entity = row.get("entities") or {}
+            if not entity or not entity.get("id"):
+                continue
+            entity_id = entity["id"]
             try:
+                # First job to pick up this entity flips 'pending' -> 'in_progress'.
+                if entity.get("enrichment_status") == "pending":
+                    update_entity(entity_id, {"enrichment_status": "in_progress"})
                 pierced = await pierce_entity(entity)
+                mark_enrichment_done(entity_id, "llc_pierce")
                 if pierced:
                     stats["records_created"] += 1
                 else:
                     stats["records_skipped"] += 1
             except Exception as e:
-                log.error("llc_piercer.entity_error",
-                          entity=entity.get("name"),
-                          error=str(e))
-
+                err = f"{type(e).__name__}: {e}"
+                log.error("llc_piercer.entity_error", entity=entity.get("name"), error=err)
+                mark_enrichment_failed(entity_id, "llc_pierce", err)
             await asyncio.sleep(1)
-
         finish_ingestion_log(log_id, stats)
-        log.info("llc_piercer.batch_complete", **stats)
-
     except Exception as e:
         finish_ingestion_log(log_id, stats, status="failed", error=str(e))
         raise

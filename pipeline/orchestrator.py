@@ -216,7 +216,13 @@ async def print_stats():
     print(f"\n  Building LLCs:   {llc_res.count:>8,}")
     print(f"  Pierced LLCs:    {pierced_res.count:>8,}")
 
-    # Queue
-    queue_res = db().table("enrichment_queue").select("id", count="exact").execute()
-    print(f"  Enrichment queue:{queue_res.count:>8,} pending")
+    # Queue breakdown by type
+    print("\n  Enrichment queue (by type):")
+    for t in ("llc_pierce", "zoominfo", "multi_source"):
+        c = db().table("enrichment_queue")\
+            .select("id", count="exact")\
+            .eq("enrichment_type", t)\
+            .limit(0)\
+            .execute().count
+        print(f"    {t:14s}: {c:>6,}")
     print("============================================\n")

@@ -91,6 +91,35 @@ def parse_bbl(bbl: str) -> tuple[str, str, str] | None:
     return boro, block, lot
 
 
+def _determine_enrichment_types(name: str, entity_type: str, extra: dict | None = None) -> list[str]:
+    """Return the enrichment_types applicable to this entity at creation time.
+    Empty list means no enrichment is needed (entity_status becomes 'done').
+
+    Rules:
+      - LLC-shaped names that look building-specific → 'llc_pierce'
+      - LLC / corporation / management_company with portfolio_size >= 3 → 'zoominfo'
+      - individual / unknown / NULL entity_type → 'multi_source'
+
+    Multiple types can apply to one entity (e.g. an LLC with 5 buildings gets
+    both 'llc_pierce' and 'zoominfo').
+    """
+    types: list[str] = []
+    extra = extra or {}
+    portfolio_size = extra.get("portfolio_size", 0) or 0
+
+    if is_building_llc(name):
+        types.append("llc_pierce")
+
+    if entity_type in ("llc", "corporation", "management_company") \
+       and portfolio_size >= config.ZOOMINFO_MIN_PORTFOLIO_SIZE:
+        types.append("zoominfo")
+
+    if entity_type in ("individual", "unknown") or not entity_type:
+        types.append("multi_source")
+
+    return types
+
+
 def is_building_llc(name: str) -> bool:
     """
     Heuristic: is this LLC named after a specific address or building?
@@ -202,9 +231,14 @@ def upsert_entity(name: str, entity_type: str, extra: dict = None) -> str:
     res = db().table("entities").insert(payload).execute()
     entity_id = res.data[0]["id"]
 
-    # Queue for enrichment if it's a new entity
-    queue_for_enrichment(entity_id, enrichment_type="both")
-    log.info("entity.created", entity=name, entity_type=entity_type, id=entity_id)
+    types = _determine_enrichment_types(name, entity_type, extra)
+    if types:
+        for t in types:
+            queue_for_enrichment(entity_id, enrichment_type=t)
+        # leave enrichment_status='pending' (default)
+    else:
+        update_entity(entity_id, {"enrichment_status": "done"})
+    log.info("entity.created", entity=name, entity_type=entity_type, id=entity_id, queue_types=types)
     return entity_id
 
 
@@ -276,43 +310,84 @@ def upsert_contact(entity_id: str, data: dict) -> str:
 # Enrichment Queue
 # ============================================================
 
-def queue_for_enrichment(entity_id: str, enrichment_type: str = "both", priority: int = 5):
-    """Add an entity to the enrichment queue if not already there."""
+def queue_for_enrichment(entity_id: str, enrichment_type: str, priority: int = 5):
+    """Add an (entity, enrichment_type) row to the queue. Idempotent."""
     db().table("enrichment_queue").upsert({
         "entity_id": entity_id,
         "enrichment_type": enrichment_type,
         "priority": priority,
-    }, on_conflict="entity_id").execute()
+    }, on_conflict="entity_id,enrichment_type").execute()
 
 
-def get_enrichment_batch(limit: int = 50, enrichment_type: str = None) -> list[dict]:
-    """Fetch next batch of entities to enrich, ordered by priority."""
-    query = db().table("enrichment_queue")\
+def get_enrichment_batch(enrichment_type: str, limit: int = 50) -> list[dict]:
+    """Fetch next batch of pending work for a given enrichment_type.
+
+    Joins the queue row with the full entity so callers don't need a second query.
+    Filters out items that have already exhausted retries (attempts >= 3).
+    """
+    res = db().table("enrichment_queue")\
         .select("*, entities(*)")\
+        .eq("enrichment_type", enrichment_type)\
         .lt("attempts", 3)\
         .order("priority", desc=False)\
         .order("created_at", desc=False)\
-        .limit(limit)
-    if enrichment_type:
-        query = query.eq("enrichment_type", enrichment_type)
-    res = query.execute()
-    return res.data
-
-
-def mark_enrichment_done(entity_id: str):
-    db().table("enrichment_queue").delete().eq("entity_id", entity_id).execute()
-    update_entity(entity_id, {"enrichment_status": "done"})
-
-
-def mark_enrichment_failed(entity_id: str, error: str):
-    db().table("enrichment_queue")\
-        .update({"attempts": db().table("enrichment_queue")
-                 .select("attempts").eq("entity_id", entity_id).execute().data[0]["attempts"] + 1,
-                 "error_message": error,
-                 "last_attempt_at": "now()"})\
-        .eq("entity_id", entity_id)\
+        .limit(limit)\
         .execute()
-    update_entity(entity_id, {"enrichment_status": "failed"})
+    return res.data or []
+
+
+def mark_enrichment_done(entity_id: str, enrichment_type: str):
+    """Remove this work item from the queue. If no items remain for the entity,
+    promote enrichment_status to 'done'."""
+    db().table("enrichment_queue")\
+        .delete()\
+        .eq("entity_id", entity_id)\
+        .eq("enrichment_type", enrichment_type)\
+        .execute()
+    remaining = db().table("enrichment_queue")\
+        .select("id", count="exact")\
+        .eq("entity_id", entity_id)\
+        .limit(0)\
+        .execute().count
+    if remaining == 0:
+        update_entity(entity_id, {"enrichment_status": "done"})
+
+
+def mark_enrichment_failed(entity_id: str, enrichment_type: str, error: str):
+    """Increment attempts. After 3 attempts, drop the row and (if no other queue
+    rows remain) set enrichment_status='failed' with the error appended to notes.
+    Otherwise leave the row in place for the next batch to retry."""
+    row = db().table("enrichment_queue")\
+        .select("attempts")\
+        .eq("entity_id", entity_id)\
+        .eq("enrichment_type", enrichment_type)\
+        .limit(1).execute().data
+    if not row:
+        return
+    attempts = (row[0]["attempts"] or 0) + 1
+    if attempts >= 3:
+        db().table("enrichment_queue")\
+            .delete()\
+            .eq("entity_id", entity_id)\
+            .eq("enrichment_type", enrichment_type)\
+            .execute()
+        remaining = db().table("enrichment_queue")\
+            .select("id", count="exact")\
+            .eq("entity_id", entity_id)\
+            .limit(0)\
+            .execute().count
+        if remaining == 0:
+            ent = db().table("entities").select("notes").eq("id", entity_id).limit(1).execute().data
+            existing = (ent[0].get("notes") or "").strip() if ent else ""
+            note = f"[enrichment_failed:{enrichment_type}] {error}"
+            merged = f"{existing}\n{note}".strip() if existing else note
+            update_entity(entity_id, {"enrichment_status": "failed", "notes": merged})
+    else:
+        db().table("enrichment_queue").update({
+            "attempts": attempts,
+            "error_message": error[:500],
+            "last_attempt_at": "now()",
+        }).eq("entity_id", entity_id).eq("enrichment_type", enrichment_type).execute()
 
 
 # ============================================================
