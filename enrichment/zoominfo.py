@@ -255,7 +255,7 @@ async def enrich_entity_with_zoominfo(entity_id: str, entity_name: str) -> bool:
 
 
 # ============================================================
-# search_contacts_at_company — used by paid_stubs.zoominfo_person_at_company
+# search_contacts_at_company — used by enrichment.contact.sources.zoominfo
 # ============================================================
 
 async def search_contacts_at_company(full_name: str, company: str) -> list:

@@ -15,6 +15,7 @@ import httpx
 import structlog
 
 from config import config
+from database.client import parse_bbl
 from ..models import ContactHit
 
 log = structlog.get_logger(__name__)
@@ -47,11 +48,10 @@ _ROLE_MAP = {
 
 async def contacts_for_bbl(bbl: str) -> list[ContactHit]:
     """Return every HPD contact row for this BBL."""
-    if not bbl or len(bbl) < 10:
+    parsed = parse_bbl(bbl)
+    if parsed is None:
         return []
-    boro = bbl[0]
-    block = str(int(bbl[1:6]))
-    lot = str(int(bbl[6:10]))
+    boro, block, lot = parsed
     where = f"boroid='{boro}' AND block='{block}' AND lot='{lot}'"
 
     async with httpx.AsyncClient(timeout=30) as client:

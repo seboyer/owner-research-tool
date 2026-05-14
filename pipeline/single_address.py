@@ -25,6 +25,7 @@ import structlog
 from config import config
 from database.client import (
     db,
+    parse_bbl,
     upsert_property,
     upsert_entity,
     upsert_contact,
@@ -135,9 +136,10 @@ async def _ingest_hpd(
     client: httpx.AsyncClient,
 ) -> Optional[tuple[str, Optional[str]]]:
     """Returns (property_id, hpd_reg_id) or None if no HPD registration."""
-    boro = bbl[0]
-    block = bbl[1:6].lstrip("0") or "0"
-    lot = bbl[6:].lstrip("0") or "0"
+    parsed = parse_bbl(bbl)
+    if parsed is None:
+        return None
+    boro, block, lot = parsed
 
     params = {
         "$where": f"boroid='{boro}' AND block='{block}' AND lot='{lot}'",
@@ -222,9 +224,10 @@ async def _ingest_hpd(
 # ============================================================
 
 async def _ingest_acris(bbl: str, property_id: str, client: httpx.AsyncClient) -> None:
-    boro = bbl[0]
-    block = bbl[1:6].lstrip("0") or "0"
-    lot = bbl[6:].lstrip("0") or "0"
+    parsed = parse_bbl(bbl)
+    if parsed is None:
+        return
+    boro, block, lot = parsed
 
     params = {
         "$where": f"borough='{boro}' AND block='{block}' AND lot='{lot}'",
@@ -302,9 +305,10 @@ async def _ingest_acris_deed_fallback(
     bbl: str, address: str, borough: str, zip_code: str,
     client: httpx.AsyncClient,
 ) -> Optional[str]:
-    boro = bbl[0]
-    block = str(int(bbl[1:6]))
-    lot = str(int(bbl[6:]))
+    parsed = parse_bbl(bbl)
+    if parsed is None:
+        return None
+    boro, block, lot = parsed
 
     params = {
         "$where": f"borough='{boro}' AND block='{block}' AND lot='{lot}'",

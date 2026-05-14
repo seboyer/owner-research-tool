@@ -13,6 +13,7 @@ import httpx
 import structlog
 
 from config import config
+from database.client import parse_bbl
 from ..models import ContactHit
 
 log = structlog.get_logger(__name__)
@@ -28,11 +29,10 @@ def _headers() -> dict:
 
 
 async def permits_for_bbl(bbl: str, limit: int = 25) -> list[ContactHit]:
-    if not bbl or len(bbl) < 10:
+    parsed = parse_bbl(bbl)
+    if parsed is None:
         return []
-    boro = bbl[0]
-    block = str(int(bbl[1:6]))
-    lot = str(int(bbl[6:10]))
+    boro, block, lot = parsed
     boro_names = {"1": "MANHATTAN", "2": "BRONX", "3": "BROOKLYN", "4": "QUEENS", "5": "STATEN ISLAND"}
     where = f"borough='{boro_names.get(boro, '')}' AND block='{block}' AND lot='{lot}'"
     params = {"$where": where, "$limit": limit, "$order": "filing_date DESC"}

@@ -23,7 +23,7 @@ from anthropic import Anthropic
 
 from config import config
 from database.client import (
-    db, upsert_entity, upsert_contact, upsert_relationship,
+    db, parse_bbl, upsert_entity, upsert_contact, upsert_relationship,
     update_entity, already_seen, mark_seen,
     start_ingestion_log, finish_ingestion_log,
 )
@@ -93,11 +93,10 @@ async def strategy_wow_portfolio(entity: dict) -> bool:
         return False
 
     # Parse BBL → boro / block / lot
-    if len(bbl) < 10:
+    parsed = parse_bbl(bbl)
+    if parsed is None:
         return False
-    boro = bbl[0]
-    block = str(int(bbl[1:6]))
-    lot = str(int(bbl[6:10]))
+    boro, block, lot = parsed
 
     import httpx
     from config import config as _cfg

@@ -32,8 +32,13 @@ from .cost_tier import CostTier, BUDGET, STANDARD, PREMIUM, tier_allows
 from .models import Signer, ProngResult, CompanyHit, ContactHit
 from .sources import (
     acris_party_history, hpd_building_contacts,
-    claude_web_search, paid_stubs, batchdata,
+    claude_web_search, batchdata,
 )
+from .sources import google_places as _google_places_src
+from .sources import hunter as _hunter_src
+from .sources import apollo as _apollo_src
+from .sources import whitepages as _whitepages_src
+from .sources import proxycurl as _proxycurl_src
 
 log = structlog.get_logger(__name__)
 
@@ -103,7 +108,7 @@ async def run(signer: Signer, tier: CostTier) -> ProngResult:
             if co.phone and co.website:
                 continue
             attempted.append("google_places")
-            gp = await paid_stubs.google_places_find_company(co.name)
+            gp = await _google_places_src.google_places_find_company(co.name)
             if gp:
                 succeeded.append("google_places")
                 _enrich_company(co, gp[0])
@@ -113,7 +118,7 @@ async def run(signer: Signer, tier: CostTier) -> ProngResult:
             if co.role_category != "owner_operating" or not co.domain:
                 continue
             attempted.append("hunter")
-            hunter_hits = await paid_stubs.hunter_domain_search(co.domain)
+            hunter_hits = await _hunter_src.hunter_domain_search(co.domain)
             if hunter_hits:
                 succeeded.append("hunter")
                 # Promote signer-name matches straight to signer contact
@@ -128,7 +133,7 @@ async def run(signer: Signer, tier: CostTier) -> ProngResult:
     if tier_allows(tier, STANDARD) and not _have_signer_email_phone(r):
         op_co = _first_company(r, "owner_operating")
         attempted.append("apollo")
-        hits = await paid_stubs.apollo_person_match(
+        hits = await _apollo_src.apollo_person_match(
             signer.full_name, company=(op_co.name if op_co else None),
         )
         if hits:
@@ -145,7 +150,7 @@ async def run(signer: Signer, tier: CostTier) -> ProngResult:
     # via contact_enrichment_runs.sources_succeeded before committing to a plan.
     if tier_allows(tier, STANDARD) and not _have_signer_email_phone(r):
         attempted.append("whitepages")
-        wp_hits = await paid_stubs.whitepages_person_search(
+        wp_hits = await _whitepages_src.whitepages_person_search(
             signer.full_name, city="New York"
         )
         if wp_hits:
@@ -162,7 +167,7 @@ async def run(signer: Signer, tier: CostTier) -> ProngResult:
         if len(parts) >= 2:
             attempted.append("proxycurl")
             op_co = _first_company(r, "owner_operating")
-            pc = await paid_stubs.proxycurl_person_lookup(
+            pc = await _proxycurl_src.proxycurl_person_lookup(
                 parts[0], parts[-1],
                 company_name=(op_co.domain or op_co.name) if op_co else None,
             )

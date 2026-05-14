@@ -190,9 +190,11 @@ async def _acris_parties_for_bbl(bbl: str, exclude_name: str) -> list[ContactHit
     if config.NYC_OPENDATA_APP_TOKEN:
         headers["X-App-Token"] = config.NYC_OPENDATA_APP_TOKEN
 
-    if not bbl or len(bbl) < 10:
+    from database.client import parse_bbl
+    parsed = parse_bbl(bbl)
+    if parsed is None:
         return []
-    boro, block, lot = bbl[0], str(int(bbl[1:6])), str(int(bbl[6:10]))
+    boro, block, lot = parsed
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             legals = await client.get(url_legals, headers=headers, params={
