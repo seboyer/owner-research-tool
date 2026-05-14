@@ -49,7 +49,7 @@ async def find_deals_by_party(full_name: str, limit: int = 50) -> list[dict]:
             r.raise_for_status()
             rows = r.json()
         except Exception as e:
-            log.warn("acris_party_history.query_failed", name=full_name, error=str(e))
+            log.warning("acris_party_history.query_failed", entity=full_name, error=str(e))
             return []
     return rows
 
@@ -76,7 +76,7 @@ async def co_owners_on_other_deals(
             r.raise_for_status()
             all_parties = r.json()
         except Exception as e:
-            log.warn("acris_party_history.co_query_failed", error=str(e))
+            log.warning("acris_party_history.co_query_failed", error=str(e))
             return []
 
     self_upper = full_name.upper()

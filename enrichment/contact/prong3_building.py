@@ -156,7 +156,7 @@ async def _property_address(signer: Signer) -> tuple[str, str, str, str]:
         city = _BOROUGH_TO_CITY.get(borough, "New York")
         return street, city, "NY", row.get("zip_code") or ""
     except Exception as e:
-        log.warn("prong3.address_lookup_failed", error=str(e))
+        log.warning("prong3.address_lookup_failed", error=str(e))
         return "", "", "", ""
 
 
@@ -201,7 +201,7 @@ async def _acris_parties_for_bbl(bbl: str, exclude_name: str) -> list[ContactHit
             legals.raise_for_status()
             docs = legals.json()
         except Exception as e:
-            log.warn("acris_bbl_history.legals_failed", error=str(e))
+            log.warning("acris_bbl_history.legals_failed", error=str(e))
             return []
         if not docs:
             return []
@@ -216,7 +216,7 @@ async def _acris_parties_for_bbl(bbl: str, exclude_name: str) -> list[ContactHit
             r.raise_for_status()
             parties = r.json()
         except Exception as e:
-            log.warn("acris_bbl_history.parties_failed", error=str(e))
+            log.warning("acris_bbl_history.parties_failed", error=str(e))
             return []
 
     out: list[ContactHit] = []

@@ -41,7 +41,7 @@ def enrich_signer(signer_contact_id: str, force: bool = False) -> dict:
     """Run all 3 prongs for one signer. Returns a stats dict."""
     signer = _load_signer(signer_contact_id)
     if signer is None:
-        log.warn("enrich_signer.signer_not_found", contact_id=signer_contact_id)
+        log.warning("enrich_signer.signer_not_found", contact_id=signer_contact_id)
         return {"error": "signer not found"}
 
     tier = tier_for_portfolio_size(signer.portfolio_size)

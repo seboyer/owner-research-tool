@@ -358,7 +358,7 @@ def _address_parts_from_bbl(signer: Signer) -> tuple[str, str, str, str]:
         city = _BOROUGH_TO_CITY.get(borough, "New York")
         return street, city, "NY", row.get("zip_code") or ""
     except Exception as e:
-        log.warn("prong1.address_parts_failed", error=str(e))
+        log.warning("prong1.address_parts_failed", error=str(e))
         return "", "", "", ""
 
 

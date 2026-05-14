@@ -61,7 +61,7 @@ async def contacts_for_bbl(bbl: str) -> list[ContactHit]:
             reg.raise_for_status()
             regs = reg.json()
         except Exception as e:
-            log.warn("hpd.reg_query_failed", bbl=bbl, error=str(e))
+            log.warning("hpd.reg_query_failed", bbl=bbl, error=str(e))
             return []
 
         if not regs:
@@ -78,7 +78,7 @@ async def contacts_for_bbl(bbl: str) -> list[ContactHit]:
             cts.raise_for_status()
             rows = cts.json()
         except Exception as e:
-            log.warn("hpd.contacts_query_failed", bbl=bbl, error=str(e))
+            log.warning("hpd.contacts_query_failed", bbl=bbl, error=str(e))
             return []
 
     out: list[ContactHit] = []

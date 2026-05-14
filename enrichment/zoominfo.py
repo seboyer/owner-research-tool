@@ -188,7 +188,7 @@ async def enrich_entity_with_zoominfo(entity_id: str, entity_name: str) -> bool:
     # Step 1: Find the company in Zoominfo
     companies = await zi.search_company(entity_name)
     if not companies:
-        log.info("zoominfo.company_not_found", entity_name=entity_name)
+        log.info("zoominfo.company_not_found", entity=entity_name)
         return False
 
     # Take best match
@@ -199,7 +199,7 @@ async def enrich_entity_with_zoominfo(entity_id: str, entity_name: str) -> bool:
         return False
 
     log.info("zoominfo.company_found",
-             entity_name=entity_name,
+             entity=entity_name,
              zi_name=company.get("name"),
              zi_id=zi_company_id)
 
@@ -215,7 +215,7 @@ async def enrich_entity_with_zoominfo(entity_id: str, entity_name: str) -> bool:
     contacts = await zi.search_contacts(zi_company_id)
 
     if not contacts:
-        log.info("zoominfo.no_contacts", entity_name=entity_name, zi_id=zi_company_id)
+        log.info("zoominfo.no_contacts", entity=entity_name, zi_id=zi_company_id)
         # Still count as success — we found the company
         return True
 
@@ -249,7 +249,7 @@ async def enrich_entity_with_zoominfo(entity_id: str, entity_name: str) -> bool:
         })
 
     log.info("zoominfo.enriched",
-             entity_name=entity_name,
+             entity=entity_name,
              contacts_found=len(contacts))
     return True
 
@@ -270,7 +270,7 @@ async def search_contacts_at_company(full_name: str, company: str) -> list:
     try:
         companies = await zi.search_company(company)
     except Exception as e:
-        log.warn("zoominfo.search_contacts.company_lookup_failed", company=company, error=str(e))
+        log.warning("zoominfo.search_contacts.company_lookup_failed", company=company, error=str(e))
         return []
 
     if not companies:
@@ -284,7 +284,7 @@ async def search_contacts_at_company(full_name: str, company: str) -> list:
     try:
         contacts = await zi.search_contacts(zi_company_id)
     except Exception as e:
-        log.warn("zoominfo.search_contacts.contacts_failed", company=company, error=str(e))
+        log.warning("zoominfo.search_contacts.contacts_failed", company=company, error=str(e))
         return []
 
     # Filter to name-match if a specific person was requested

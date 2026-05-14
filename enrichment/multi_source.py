@@ -218,11 +218,11 @@ async def enrich_via_whitepages(
                     "source": "whitepages",
                     "confidence": 0.80,
                 })
-                log.info("multi_source.whitepages_found", name=full_name)
+                log.info("multi_source.whitepages_found", entity=full_name)
                 return True
 
         except Exception as e:
-            log.warning("multi_source.whitepages_error", name=full_name, error=str(e))
+            log.warning("multi_source.whitepages_error", entity=full_name, error=str(e))
 
     return False
 
@@ -516,11 +516,11 @@ async def enrich_via_proxycurl(
                     "source": "proxycurl",
                     "confidence": 0.85,
                 })
-                log.info("multi_source.proxycurl_found", name=full_name)
+                log.info("multi_source.proxycurl_found", entity=full_name)
                 return True
 
         except Exception as e:
-            log.warning("multi_source.proxycurl_error", name=full_name, error=str(e))
+            log.warning("multi_source.proxycurl_error", entity=full_name, error=str(e))
 
     return False
 

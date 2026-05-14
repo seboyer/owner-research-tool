@@ -143,7 +143,7 @@ async def _writeback_to_airtable(
 ) -> None:
     """PATCH the Airtable row with the discovered BBL Number + HPD Building ID."""
     if not config.AIRTABLE_API_KEY:
-        log.warn("airtable.writeback_skipped_no_key", record_id=record_id)
+        log.warning("airtable.writeback_skipped_no_key", record_id=record_id)
         return
     if not (bbl or hpd_reg_id):
         log.info("airtable.writeback_skipped_no_data", record_id=record_id)
@@ -319,7 +319,7 @@ async def run_now(
 if __name__ == "__main__":
     import uvicorn
 
-    port = int(os.getenv("PORT", "8000"))
+    port = config.WEBHOOK_PORT
     uvicorn.run(
         "webhook:app",
         host="0.0.0.0",

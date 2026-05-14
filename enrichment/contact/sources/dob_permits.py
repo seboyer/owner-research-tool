@@ -43,7 +43,7 @@ async def permits_for_bbl(bbl: str, limit: int = 25) -> list[ContactHit]:
             r.raise_for_status()
             rows = r.json()
         except Exception as e:
-            log.warn("dob_permits.query_failed", bbl=bbl, error=str(e))
+            log.warning("dob_permits.query_failed", bbl=bbl, error=str(e))
             return []
 
     out: list[ContactHit] = []

@@ -91,11 +91,11 @@ Research this signer and return the JSON described in your instructions."""
             err_str = str(e)
             if "rate_limit" in err_str and attempt < 2:
                 wait = 60 * (attempt + 1)  # 60s, then 120s
-                log.warn("claude_web_search.rate_limit_retry",
+                log.warning("claude_web_search.rate_limit_retry",
                          attempt=attempt + 1, wait_seconds=wait, error=err_str[:120])
                 time.sleep(wait)
             else:
-                log.warn("claude_web_search.api_failed", error=err_str[:200])
+                log.warning("claude_web_search.api_failed", error=err_str[:200])
                 return {}
     if resp is None:
         return {}
@@ -112,7 +112,7 @@ Research this signer and return the JSON described in your instructions."""
     try:
         return json.loads(m.group(0))
     except Exception as e:
-        log.warn("claude_web_search.json_parse_failed", error=str(e), raw=text[:500])
+        log.warning("claude_web_search.json_parse_failed", error=str(e), raw=text[:500])
         return {}
 
 

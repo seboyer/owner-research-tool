@@ -358,11 +358,11 @@ async def pierce_llc_via_mortgage(
     if already_seen("acris_pdf_pierce", cache_key):
         return False
 
-    log.info("acris_pdf.starting", entity_name=entity_name, bbl=bbl)
+    log.info("acris_pdf.starting", entity=entity_name, bbl=bbl)
 
     docs = await get_mortgage_docs_for_bbl(bbl)
     if not docs:
-        log.info("acris_pdf.no_mortgages", entity_name=entity_name, bbl=bbl)
+        log.info("acris_pdf.no_mortgages", entity=entity_name, bbl=bbl)
         mark_seen("acris_pdf_pierce", cache_key)
         return False
 
@@ -402,7 +402,7 @@ async def pierce_llc_via_mortgage(
             await process_pdf_signers(extracted, entity_id, entity_name, doc_id)
             found_signers = True
             log.info("acris_pdf.signers_found",
-                     entity_name=entity_name,
+                     entity=entity_name,
                      count=len(signers))
 
         mark_seen("acris_pdf_doc", doc_id)

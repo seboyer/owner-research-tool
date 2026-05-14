@@ -163,7 +163,7 @@ async def lookup_llc(entity_id: str, entity_name: str) -> dict | None:
     async with OpenCorporatesClient() as oc:
         results = await oc.search_company(entity_name)
         if not results:
-            log.info("opencorporates.not_found", entity_name=entity_name)
+            log.info("opencorporates.not_found", entity=entity_name)
             return None
 
         # Take the first result (highest relevance score)
@@ -190,7 +190,7 @@ async def lookup_llc(entity_id: str, entity_name: str) -> dict | None:
         })
 
         log.info("opencorporates.enriched",
-                 entity_name=entity_name,
+                 entity=entity_name,
                  agent_name=agent_name,
                  agent_type=agent_type)
 
@@ -277,7 +277,7 @@ async def scrape_nys_dos(entity_name: str) -> dict | None:
             }
 
         except Exception as e:
-            log.warning("nys_dos.scrape_error", entity_name=entity_name, error=str(e))
+            log.warning("nys_dos.scrape_error", entity=entity_name, error=str(e))
             return None
 
 
@@ -304,7 +304,7 @@ async def run_batch(batch_size: int = 20):
         try:
             result = await lookup_llc(entity_id, entity_name)
             if result:
-                log.info("opencorporates.enriched_entity", name=entity_name)
+                log.info("opencorporates.enriched_entity", entity=entity_name)
             else:
                 # Fallback to DOS scraper
                 dos_data = await scrape_nys_dos(entity_name)
@@ -314,6 +314,6 @@ async def run_batch(batch_size: int = 20):
                         "formation_date": dos_data.get("formation_date"),
                     })
         except Exception as e:
-            log.error("opencorporates.entity_error", name=entity_name, error=str(e))
+            log.error("opencorporates.entity_error", entity=entity_name, error=str(e))
 
         await asyncio.sleep(1.2)  # Respect rate limits (free tier: ~1 req/sec)
