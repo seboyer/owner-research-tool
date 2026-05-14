@@ -196,11 +196,17 @@ async def print_stats():
         print(f"  {table:30s}: {res.count:>8,} rows")
 
     # Enrichment breakdown
-    res = db().table("entities")\
-        .select("enrichment_status", count="exact")\
-        .execute()
     print("\n  Enrichment status breakdown:")
-    status_res = db().rpc("get_enrichment_breakdown", {}).execute()
+    status_rows = db().table("entities").select("enrichment_status").execute().data or []
+    breakdown: dict[str, int] = {}
+    for row in status_rows:
+        status = row.get("enrichment_status") or "(null)"
+        breakdown[status] = breakdown.get(status, 0) + 1
+    for status in ("pending", "in_progress", "done", "failed"):
+        if status in breakdown:
+            print(f"    {status:14s}: {breakdown.pop(status):>8,}")
+    for status, count in sorted(breakdown.items()):
+        print(f"    {status:14s}: {count:>8,}")
 
     # Building LLCs
     llc_res = db().table("entities").select("id", count="exact")\
