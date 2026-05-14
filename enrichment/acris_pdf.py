@@ -32,7 +32,7 @@ from anthropic import Anthropic
 
 from config import config
 from database.client import (
-    db, upsert_entity, upsert_contact, upsert_relationship,
+    db, parse_bbl, upsert_entity, upsert_contact, upsert_relationship,
     already_seen, mark_seen,
 )
 
@@ -57,9 +57,10 @@ async def get_mortgage_docs_for_bbl(bbl: str) -> list[dict]:
     This hits data.cityofnewyork.us (NOT a836-acris.nyc.gov) — no anti-bot.
     Returns list of {document_id, doc_type, recorded_datetime}.
     """
-    boro = bbl[0]
-    block = bbl[1:6].lstrip("0")
-    lot = bbl[6:10].lstrip("0")
+    parsed = parse_bbl(bbl)
+    if parsed is None:
+        return []
+    boro, block, lot = parsed
 
     async with httpx.AsyncClient() as client:
         params = {

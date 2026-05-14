@@ -22,7 +22,7 @@ load_dotenv()
 
 from config import config
 from database.client import (
-    db, upsert_property, upsert_entity, upsert_contact,
+    db, parse_bbl, upsert_property, upsert_entity, upsert_contact,
     upsert_property_role, normalize_name,
 )
 from enrichment.llc_piercer import pierce_entity
@@ -91,9 +91,10 @@ async def geocode_address(address: str, client: httpx.AsyncClient) -> dict | Non
 
 async def ingest_hpd_for_bbl(bbl: str, address: str, borough: str, zip_code: str, client: httpx.AsyncClient) -> str | None:
     """Fetch HPD registrations and contacts for a single BBL, store in DB."""
-    boro = bbl[0]
-    block = bbl[1:6].lstrip("0")
-    lot = bbl[6:].lstrip("0")
+    parsed = parse_bbl(bbl)
+    if parsed is None:
+        return None
+    boro, block, lot = parsed
 
     # Query HPD Registrations to get registrationid
     reg_url = config.HPD_REGISTRATIONS_URL
@@ -187,9 +188,10 @@ async def ingest_hpd_for_bbl(bbl: str, address: str, borough: str, zip_code: str
 
 async def ingest_acris_for_bbl(bbl: str, property_id: str, client: httpx.AsyncClient):
     """Fetch ACRIS mortgage records for a BBL, store owner entities."""
-    boro = bbl[0]
-    block = bbl[1:6].lstrip("0") or "0"
-    lot = bbl[6:].lstrip("0") or "0"
+    parsed = parse_bbl(bbl)
+    if parsed is None:
+        return
+    boro, block, lot = parsed
 
     # Query ACRIS Legals (property → doc_id)
     legals_url = config.ACRIS_LEGALS_URL
@@ -290,9 +292,10 @@ async def ingest_acris_deed_fallback(bbl: str, address: str, borough: str, zip_c
     look up the current owner via ACRIS deed records (the most recent
     DEED doc's grantee = current owner).
     """
-    boro = bbl[0]
-    block = str(int(bbl[1:6]))
-    lot = str(int(bbl[6:]))
+    parsed = parse_bbl(bbl)
+    if parsed is None:
+        return None
+    boro, block, lot = parsed
 
     # 1. Get document IDs for this BBL from ACRIS Legals
     params = {

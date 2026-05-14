@@ -20,8 +20,9 @@ import structlog
 from .cost_tier import CostTier, BUDGET, STANDARD, PREMIUM, tier_allows
 from .models import Signer, ProngResult, ContactHit
 from .sources import (
-    acris_party_history, opencorporates_graph, paid_stubs,
+    acris_party_history, opencorporates_graph,
 )
+from .sources import hunter as _hunter_src
 from .filters import is_govt_entity
 
 log = structlog.get_logger(__name__)
@@ -64,7 +65,7 @@ async def run(signer: Signer, tier: CostTier) -> ProngResult:
         if op_cos:
             attempted.append("hunter")
             for op_co in op_cos[:2]:
-                hits = await paid_stubs.hunter_domain_search(op_co["domain"])
+                hits = await _hunter_src.hunter_domain_search(op_co["domain"])
                 if hits:
                     succeeded.append("hunter")
                     for h in hits[:MAX_COWORKERS]:

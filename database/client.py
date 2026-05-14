@@ -71,6 +71,26 @@ def checksum(data: dict) -> str:
     return hashlib.md5(key.encode()).hexdigest()
 
 
+def parse_bbl(bbl: str) -> tuple[str, str, str] | None:
+    """Decompose a 10-digit BBL into (boro, block, lot) as unpadded strings,
+    suitable for ACRIS / HPD Socrata API queries. Returns None on malformed input.
+
+    NYC BBL format: 1 digit borough + 5 digit block + 4 digit lot, zero-padded.
+    The Socrata API expects the block/lot values WITHOUT leading zeros, so this
+    helper strips them.
+
+        parse_bbl("1000010001")  -> ("1", "1", "1")
+        parse_bbl("3016270036")  -> ("3", "1627", "36")
+        parse_bbl("")            -> None
+    """
+    if not bbl or len(bbl) < 10:
+        return None
+    boro = bbl[0]
+    block = bbl[1:6].lstrip("0") or "0"
+    lot = bbl[6:10].lstrip("0") or "0"
+    return boro, block, lot
+
+
 def is_building_llc(name: str) -> bool:
     """
     Heuristic: is this LLC named after a specific address or building?

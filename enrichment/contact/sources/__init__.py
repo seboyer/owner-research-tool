@@ -15,16 +15,16 @@ Free / public sources (always on):
 
 Budget-tier (paid, per-query):
     batchdata               BatchData V3 skip trace — phones + emails by property address
-    google_places           Google Maps API — company phone/website by name
-    hunter                  Hunter.io — email finder by domain
+    google_places           Google Maps API — company phone/website by name (GOOGLE_PLACES_API_KEY)
+    hunter                  Hunter.io — email finder by domain (HUNTER_API_KEY)
 
 Standard-tier:
-    apollo                  Apollo.io — person + email + phone match
-    whitepages              Whitepages Pro — individual phones
+    apollo                  Apollo.io — person + email + phone match (APOLLO_API_KEY)
+    whitepages              Whitepages Pro — individual phones (WHITEPAGES_API_KEY)
     property_radar          PropertyRadar — real estate owner contacts
 
 Premium-tier:
-    zoominfo_person         Zoominfo contact search
-    proxycurl               LinkedIn profile scraper
+    proxycurl               LinkedIn profile scraper (PROXYCURL_API_KEY)
+    zoominfo                Zoominfo contact search (delegates to enrichment/zoominfo.py)
     reonomy                 Reonomy / PropertyShark
 """
