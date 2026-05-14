@@ -6,8 +6,6 @@ Supabase note: newer projects use SUPABASE_KEY (anon key + RLS) rather than
 a service role key. Both SUPABASE_KEY and the legacy SUPABASE_SERVICE_KEY are
 accepted — whichever is set will be used.
 
-OpenCorporates: removed — price prohibitive for commercial use.
-
 Source waterfall (free → paid, activated by API key presence):
   Free:     ACRIS, HPD, DOB, WoW, Claude web_search
   Budget:   BatchData, Google Places, Hunter

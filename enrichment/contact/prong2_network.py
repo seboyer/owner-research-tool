@@ -4,8 +4,8 @@ Prong 2 — Signer's network.
 Returns three kinds of people, each tagged with network_role:
 
     network_role='coworker'    — people listed on the signer's operating
-                                  company (OpenCorporates officers, Hunter
-                                  domain emails, Apollo org employees)
+                                  company (Hunter domain emails, Apollo
+                                  org employees)
     network_role='co_owner'    — people who appear as parties on OTHER
                                   ACRIS deals alongside the signer
     network_role='co_officer'  — people listed on OTHER non-building LLCs
@@ -20,7 +20,7 @@ import structlog
 from .cost_tier import CostTier, BUDGET, STANDARD, PREMIUM, tier_allows
 from .models import Signer, ProngResult, ContactHit
 from .sources import (
-    acris_party_history, opencorporates_graph, paid_stubs,
+    acris_party_history, paid_stubs,
 )
 from .filters import is_govt_entity
 
@@ -46,9 +46,6 @@ async def run(signer: Signer, tier: CostTier) -> ProngResult:
             if is_govt_entity(c.full_name):
                 continue
             r.contacts.append(c)
-
-    # ---------- co_officers via OpenCorporates — disabled (price prohibitive) ----------
-    # Not added to sources_attempted — disabled globally via _DISABLED flag.
 
     # ---------- coworkers (budget+) via Hunter domain search ----------
     if tier_allows(tier, BUDGET):

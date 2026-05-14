@@ -27,7 +27,6 @@ That signer is the seed. From the seed we run three prongs in parallel.
 |------|--------|-----------------|
 | Free | ACRIS party history | What address does ACRIS have on file for the signer? |
 | Free | HPD registration | Is there a managing agent / head officer already recorded? |
-| Free | OpenCorporates | Non-building LLCs where signer is an officer → owner operating candidates |
 | Free | Claude `web_search` | Resolve ambiguity by searching The Real Deal / PincusCo / LinkedIn |
 | Budget | **BatchData V3 Skip Trace** | **Direct phone + email for the property owner by address** |
 | Budget | Google Places | Phone + website for candidate company |
@@ -48,7 +47,6 @@ That signer is the seed. From the seed we run three prongs in parallel.
 | Tier | Source |
 |------|--------|
 | Free | ACRIS party history (join on document_id) |
-| Free | OpenCorporates (officer graph) |
 | Budget | Hunter.io domain search |
 | Standard | Apollo.io org-people |
 

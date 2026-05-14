@@ -36,7 +36,6 @@ You have access to a web_search tool. Use it liberally. Search sources:
 - The property address + "owner" / "management company"
 - NYC real estate news (The Real Deal, Commercial Observer, PincusCo, NY YIMBY)
 - LinkedIn company pages
-- OpenCorporates
 - Company websites (about/team pages)
 
 Return ONLY a JSON object with this shape:

@@ -13,7 +13,6 @@ Waterfall (stops expanding tiers once we have phone+email+both companies):
       1. ACRIS party history — what address does ACRIS have on file?
       2. HPD registration — is there a head officer / managing agent already?
       3. Claude web_search — resolve owner-operating-co vs mgmt-co from web
-         (OpenCorporates removed — price prohibitive)
 
     BUDGET:  + BatchData V3 skip trace (direct phone+email from property address)
              + Google Places (phone + website for the candidate company)
@@ -32,7 +31,7 @@ import structlog
 from .cost_tier import CostTier, BUDGET, STANDARD, PREMIUM, tier_allows
 from .models import Signer, ProngResult, CompanyHit, ContactHit
 from .sources import (
-    acris_party_history, hpd_building_contacts, opencorporates_graph,
+    acris_party_history, hpd_building_contacts,
     claude_web_search, paid_stubs, batchdata,
 )
 
@@ -58,11 +57,7 @@ async def run(signer: Signer, tier: CostTier) -> ProngResult:
             succeeded.append("hpd_registration")
             _ingest_hpd_into_prong1(r, signer, hpd_contacts)
 
-    # ---------- 3. OpenCorporates — disabled (price prohibitive) ----------
-    # Intentionally not added to sources_attempted — disabled globally.
-    # oc_companies = await opencorporates_graph.companies_for_person(signer.full_name)
-
-    # ---------- 4. Claude web_search — authoritative resolution ----------
+    # ---------- 3. Claude web_search — authoritative resolution ----------
     attempted.append("claude_web_search")
     property_address = _property_address(signer)
     web = await claude_web_search.research_signer(
