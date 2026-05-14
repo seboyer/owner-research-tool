@@ -444,56 +444,35 @@ async def pierce_entity(entity: dict) -> bool:
     Returns True if we found the real owner through any strategy.
     Stops after the first successful high-confidence pierce.
 
-    Sets enrichment_status: 'in_progress' on entry, 'done' once the strategy
-    loop completes (regardless of whether an owner was found — exhausting the
-    strategies is still a completed enrichment attempt), or 'failed' if an
-    unrecoverable exception escapes the loop.
+    Queue and enrichment_status concerns live in run_batch — this function
+    only sets is_pierced=True on success and returns True/False.
     """
     entity_id = entity["id"]
     entity_name = entity["name"]
 
     log.info("llc_piercer.starting", entity=entity_name)
-    update_entity(entity_id, {"enrichment_status": "in_progress"})
 
-    try:
-        for strategy_name, strategy_fn, min_confidence in STRATEGIES:
-            try:
-                log.info("llc_piercer.trying_strategy",
+    for strategy_name, strategy_fn, min_confidence in STRATEGIES:
+        try:
+            log.info("llc_piercer.trying_strategy",
+                     entity=entity_name, strategy=strategy_name)
+            success = await strategy_fn(entity)
+            if success:
+                log.info("llc_piercer.strategy_succeeded",
                          entity=entity_name, strategy=strategy_name)
-                success = await strategy_fn(entity)
-                if success:
-                    log.info("llc_piercer.strategy_succeeded",
-                             entity=entity_name, strategy=strategy_name)
-                    update_entity(entity_id, {
-                        "is_pierced": True,
-                        "enrichment_status": "done",
-                    })
-                    return True
-            except Exception as e:
-                # Per-strategy failure is non-fatal — try the next strategy.
-                log.error("llc_piercer.strategy_error",
-                          entity=entity_name,
-                          strategy=strategy_name,
-                          error=str(e))
+                update_entity(entity_id, {"is_pierced": True})
+                return True
+        except Exception as e:
+            # Per-strategy failure is non-fatal — try the next strategy.
+            log.error("llc_piercer.strategy_error",
+                      entity=entity_name,
+                      strategy=strategy_name,
+                      error=str(e))
 
-            await asyncio.sleep(0.5)
+        await asyncio.sleep(0.5)
 
-        log.info("llc_piercer.all_strategies_failed", entity=entity_name)
-        update_entity(entity_id, {"enrichment_status": "done"})
-        return False
-
-    except Exception as e:
-        # Loop itself blew up (DB error, etc.) — surface as 'failed'.
-        err = f"{type(e).__name__}: {e}"
-        log.error("llc_piercer.pierce_failed", entity=entity_name, error=err)
-        existing_notes = (entity.get("notes") or "").strip()
-        note_line = f"[enrichment_failed] llc_piercer: {err}"
-        merged_notes = f"{existing_notes}\n{note_line}".strip() if existing_notes else note_line
-        update_entity(entity_id, {
-            "enrichment_status": "failed",
-            "notes": merged_notes,
-        })
-        return False
+    log.info("llc_piercer.all_strategies_failed", entity=entity_name)
+    return False
 
 
 async def run_batch(batch_size: int = 20):
