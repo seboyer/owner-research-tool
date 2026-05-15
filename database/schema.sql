@@ -217,3 +217,20 @@ CREATE TRIGGER trg_properties_updated_at  BEFORE UPDATE ON properties  FOR EACH 
 CREATE TRIGGER trg_entities_updated_at    BEFORE UPDATE ON entities    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 CREATE TRIGGER trg_contacts_updated_at    BEFORE UPDATE ON contacts    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 CREATE TRIGGER trg_seen_records_updated_at BEFORE UPDATE ON seen_records FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- ============================================================
+-- ZIPCODE ALLOWLIST
+-- Per-zipcode gate for scheduled enrichment stages.
+-- Only the four enrichment queue-drainer stages consult this table.
+-- NYC-wide ingestion (ACRIS delta, HPD full, WoW) is not gated.
+-- Seed data is inserted by migration 005_zipcode_allowlist.sql.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS zipcode_allowlist (
+    zip_code   TEXT PRIMARY KEY,
+    enabled    BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_by TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_zipcode_allowlist_enabled
+    ON zipcode_allowlist(enabled);

@@ -28,6 +28,7 @@ import httpx
 import structlog
 from anthropic import Anthropic
 
+from admin.allowlist import is_entity_allowed_by_zip
 from config import config
 from database.client import (
     db, upsert_contact, update_entity,
@@ -635,6 +636,7 @@ async def run_batch(batch_size: int = 100):
     """
     log_id = start_ingestion_log("multi_source_enrichment")
     stats = {"records_fetched": 0, "records_created": 0, "records_skipped": 0}
+    skipped_by_zip = 0
 
     try:
         queue_rows = get_enrichment_batch(enrichment_type="multi_source", limit=batch_size)
@@ -646,6 +648,10 @@ async def run_batch(batch_size: int = 100):
             if not entity or not entity.get("id"):
                 continue
             entity_id = entity["id"]
+            if not is_entity_allowed_by_zip(entity_id):
+                skipped_by_zip += 1
+                log.debug("multi_source.skipped_by_zip", entity=entity.get("name"), entity_id=entity_id)
+                continue
             try:
                 # First job to pick up this entity flips 'pending' -> 'in_progress'.
                 if entity.get("enrichment_status") == "pending":
@@ -664,7 +670,7 @@ async def run_batch(batch_size: int = 100):
             await asyncio.sleep(1)
 
         finish_ingestion_log(log_id, stats)
-        log.info("multi_source.batch_complete", **stats)
+        log.info("multi_source.batch_complete", **stats, skipped_by_zip=skipped_by_zip)
 
     except Exception as e:
         finish_ingestion_log(log_id, stats, status="failed", error=str(e))
