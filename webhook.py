@@ -42,6 +42,7 @@ import structlog
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from admin.routes import router as admin_router
 from config import config, validate_required_config
 from pipeline.single_address import research_address, AddressResult
 from scheduler import build_async_scheduler, register_jobs
@@ -87,6 +88,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+app.include_router(admin_router)
 
 
 # ============================================================

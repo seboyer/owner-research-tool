@@ -30,6 +30,7 @@ import httpx
 import structlog
 from anthropic import Anthropic
 
+from admin.allowlist import is_entity_allowed_by_zip
 from config import config
 from database.client import (
     db, parse_bbl, upsert_entity, upsert_contact, upsert_relationship,
@@ -457,9 +458,15 @@ async def run_batch_pdf_pierce(batch_size: int = 20):
     entities = res.data
     log.info("acris_pdf.batch_start", count=len(entities))
 
+    skipped_by_zip = 0
     for entity in entities:
         entity_id = entity["id"]
         entity_name = entity["name"]
+
+        if not is_entity_allowed_by_zip(entity_id):
+            skipped_by_zip += 1
+            log.debug("acris_pdf.skipped_by_zip", entity=entity_name, entity_id=entity_id)
+            continue
 
         roles_res = db().table("property_roles")\
             .select("property_id, properties(bbl)")\
@@ -483,3 +490,5 @@ async def run_batch_pdf_pierce(batch_size: int = 20):
                 .execute()
 
         await asyncio.sleep(2)
+
+    log.info("acris_pdf.batch_complete", count=len(entities), skipped_by_zip=skipped_by_zip)

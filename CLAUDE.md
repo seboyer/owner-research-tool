@@ -26,6 +26,7 @@ cp .env.example .env  # then fill in API keys
 # 2. database/migrations/002_contact_enrichment.sql
 # 3. database/migrations/003_reconcile_and_queue.sql
 # 4. database/migrations/004_drop_opencorporates_url.sql
+# 5. database/migrations/005_zipcode_allowlist.sql
 
 # CLI (main entry point)
 python main.py full-load          # one-time initial load (hours)
@@ -190,6 +191,7 @@ All settings loaded from environment variables. Key tunables:
 - `ACRIS_LOOKBACK_DAYS` (default: 30)
 - `ZOOMINFO_MIN_PORTFOLIO_SIZE` (skip small portfolios)
 - `ENVIRONMENT` (development/production)
+- `ADMIN_PASSWORD` — HTTP Basic Auth password for `/admin`. Required to access admin dashboard; returns 500 if unset.
 
 All enrichment API keys are optional — the system degrades gracefully when keys are missing.
 

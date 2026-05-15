@@ -28,6 +28,7 @@ import httpx
 import jwt  # PyJWT
 import structlog
 
+from admin.allowlist import is_entity_allowed_by_zip
 from config import config
 from database.client import (
     db, upsert_contact, update_entity,
@@ -352,6 +353,7 @@ async def run_batch(batch_size: int = None):
     batch_size = batch_size or config.ENRICHMENT_BATCH_SIZE
     log_id = start_ingestion_log("zoominfo_enrichment")
     stats = {"records_fetched": 0, "records_created": 0, "records_skipped": 0}
+    skipped_by_zip = 0
 
     try:
         queue_rows = get_enrichment_batch(enrichment_type="zoominfo", limit=batch_size)
@@ -364,6 +366,11 @@ async def run_batch(batch_size: int = None):
                 continue
             entity_id = entity["id"]
             entity_name = entity["name"]
+
+            if not is_entity_allowed_by_zip(entity_id):
+                skipped_by_zip += 1
+                log.debug("zoominfo.skipped_by_zip", entity=entity_name, entity_id=entity_id)
+                continue
 
             try:
                 # First job to pick up this entity flips 'pending' -> 'in_progress'.
@@ -384,7 +391,7 @@ async def run_batch(batch_size: int = None):
             await asyncio.sleep(1.5)
 
         finish_ingestion_log(log_id, stats)
-        log.info("zoominfo.batch_complete", **stats)
+        log.info("zoominfo.batch_complete", **stats, skipped_by_zip=skipped_by_zip)
 
     except Exception as e:
         finish_ingestion_log(log_id, stats, status="failed", error=str(e))
