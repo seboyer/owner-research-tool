@@ -122,13 +122,13 @@ async def api_zipcodes(_auth: None = Depends(_auth)) -> list[dict]:
         if z:
             known_zips.add(z)
 
-    # Upsert any new zips (enabled=true by default)
+    # Upsert any new zips (disabled by default — must be opted in via admin)
     existing_res = db().table("zipcode_allowlist").select("zip_code").execute()
     existing_zips: set[str] = {r["zip_code"] for r in (existing_res.data or [])}
     new_zips = known_zips - existing_zips
     if new_zips:
         db().table("zipcode_allowlist").upsert(
-            [{"zip_code": z, "enabled": True} for z in new_zips],
+            [{"zip_code": z, "enabled": False} for z in new_zips],
             on_conflict="zip_code",
         ).execute()
         log.info("admin.zipcodes.discovered", count=len(new_zips))

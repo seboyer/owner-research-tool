@@ -6,6 +6,7 @@ Default-allow rules (prefer over-processing to silent drops):
   not yet HPD-enriched).
 - At least one linked property's zip is enabled in the allowlist -> allow
   (any-match wins).
+- Zip not in allowlist table -> skip (new zips must be opted in via admin).
 - Otherwise (all linked zips known, none enabled) -> skip.
 """
 
@@ -65,6 +66,6 @@ def is_entity_allowed_by_zip(entity_id: str) -> bool:
             # Unknown zip — default allow
             return True
         saw_known_zip = True
-        if allow.get(z, True):  # missing keys default to True (new zip not yet in table)
+        if allow.get(z, False):  # missing keys default to False (new zip must be opted in)
             return True
     return not saw_known_zip
