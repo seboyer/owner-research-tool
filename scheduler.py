@@ -118,7 +118,7 @@ def register_jobs(scheduler) -> list[str]:
         scheduler.add_job(
             _job_weekly,
             trigger=CronTrigger(
-                day_of_week="tue", hour=2, minute=0, timezone="America/New_York"
+                day_of_week=config.WEEKLY_PIPELINE_DAY, hour=2, minute=0, timezone="America/New_York"
             ),
             id="weekly_pipeline",
             name="Weekly Full Pipeline",
@@ -191,7 +191,7 @@ def main():
         scheduler.add_job(
             _run_async(_job_weekly),
             trigger=CronTrigger(
-                day_of_week="tue", hour=2, minute=0, timezone="America/New_York"
+                day_of_week=config.WEEKLY_PIPELINE_DAY, hour=2, minute=0, timezone="America/New_York"
             ),
             id="weekly_pipeline",
             misfire_grace_time=7200,
