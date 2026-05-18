@@ -97,6 +97,7 @@ class Config:
     # once the pipeline has been validated against live data.
     # ------------------------------------------------------------------
     AUTO_SEARCH_ENABLED: bool = os.getenv("AUTO_SEARCH_ENABLED", "false").lower() in ("true", "1", "yes")
+    WEEKLY_PIPELINE_DAY: str = os.getenv("WEEKLY_PIPELINE_DAY", "tue")
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
 
     # ------------------------------------------------------------------
