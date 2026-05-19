@@ -9,7 +9,6 @@ config.ADMIN_PASSWORD. Returns:
 
 from __future__ import annotations
 
-import asyncio
 import base64
 from typing import Optional
 
@@ -26,9 +25,6 @@ from database.client import db
 log = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
-
-# In-memory flag — resets on restart, which also kills any running job.
-_running: dict[str, bool] = {"daily": False, "weekly": False}
 
 
 # ============================================================
@@ -217,45 +213,32 @@ async def api_runs(_auth: None = Depends(_auth)) -> list[dict]:
 
 # ============================================================
 # Manual pipeline triggers
+#
+# Disabled in the web service: running the pipeline in-process blocks the
+# event loop with sync Supabase calls and trips Render's /health timeout
+# (the failure mode that prompted the worker-split refactor). The scheduler
+# now lives in a separate worker service. A follow-up will route manual
+# triggers through a DB-backed queue that the worker polls.
 # ============================================================
+
+_TRIGGERS_DISABLED_MSG = (
+    "Manual pipeline triggers are temporarily disabled. The scheduler "
+    "runs in a separate worker service; manual triggers will be re-enabled "
+    "once they route through that worker. Until then, use the cron schedule."
+)
+
 
 @router.get("/api/run-status")
 async def api_run_status(_auth: None = Depends(_auth)) -> dict:
-    """Return which pipelines are currently running."""
-    return dict(_running)
-
-
-async def _run_pipeline(name: str) -> None:
-    _running[name] = True
-    try:
-        if name == "daily":
-            from pipeline.orchestrator import run_daily_pipeline
-            await run_daily_pipeline()
-        else:
-            from pipeline.orchestrator import run_weekly_pipeline
-            await run_weekly_pipeline()
-        log.info("admin.manual_run.done", pipeline=name)
-    except Exception as e:
-        log.error("admin.manual_run.error", pipeline=name, error=str(e))
-    finally:
-        _running[name] = False
+    """Always returns not-running while manual triggers are disabled."""
+    return {"daily": False, "weekly": False, "disabled": True}
 
 
 @router.post("/run/daily")
 async def run_daily(_auth: None = Depends(_auth)) -> dict:
-    """Kick off the daily pipeline in the background."""
-    if _running["daily"]:
-        raise HTTPException(status_code=409, detail="Daily pipeline already running")
-    asyncio.create_task(_run_pipeline("daily"))
-    log.info("admin.manual_run.started", pipeline="daily")
-    return {"ok": True, "started": "daily"}
+    raise HTTPException(status_code=503, detail=_TRIGGERS_DISABLED_MSG)
 
 
 @router.post("/run/weekly")
 async def run_weekly(_auth: None = Depends(_auth)) -> dict:
-    """Kick off the weekly pipeline in the background."""
-    if _running["weekly"]:
-        raise HTTPException(status_code=409, detail="Weekly pipeline already running")
-    asyncio.create_task(_run_pipeline("weekly"))
-    log.info("admin.manual_run.started", pipeline="weekly")
-    return {"ok": True, "started": "weekly"}
+    raise HTTPException(status_code=503, detail=_TRIGGERS_DISABLED_MSG)

@@ -143,8 +143,10 @@ ADMIN_HTML = """<!DOCTYPE html>
   <div class="banner-item">multi_source: <strong id="q-ms">—</strong></div>
   <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
     <button class="btn" onclick="loadStatus()">Refresh status</button>
-    <button id="btn-run-daily" class="btn btn-primary" onclick="triggerRun('daily')">Run Daily</button>
-    <button id="btn-run-weekly" class="btn btn-primary" onclick="triggerRun('weekly')">Run Weekly</button>
+    <button id="btn-run-daily" class="btn btn-primary" onclick="triggerRun('daily')" disabled
+            title="Disabled — scheduler now runs in a worker service. Use the cron schedule.">Run Daily</button>
+    <button id="btn-run-weekly" class="btn btn-primary" onclick="triggerRun('weekly')" disabled
+            title="Disabled — scheduler now runs in a worker service. Use the cron schedule.">Run Weekly</button>
   </div>
 </div>
 
