@@ -31,7 +31,7 @@ from database.client import (
     start_ingestion_log, finish_ingestion_log,
 )
 from database.retry import retry_external
-from ingest.hpd import paginate  # reuse the same paginator
+from ingest.hpd import _TRANSIENT_NET_ERRORS, paginate  # reuse the paginator + transient set
 
 log = structlog.get_logger(__name__)
 
@@ -221,37 +221,46 @@ async def ingest_acris_deeds():
                 mark_seen("acris_deed", doc_id)
                 continue
 
-            # Upsert property
-            borough_names = {"1": "MANHATTAN", "2": "BRONX", "3": "BROOKLYN", "4": "QUEENS", "5": "STATEN ISLAND"}
-            property_id = upsert_property(bbl, {
-                "borough": borough_names.get(str(legal.get("borough", "")), ""),
-                "block": str(legal.get("block", "")).zfill(5),
-                "lot": str(legal.get("lot", "")).zfill(4),
-                "street_name": legal.get("street_name", ""),
-                "house_number": legal.get("address_number", ""),
-                "address": f"{legal.get('address_number', '')} {legal.get('street_name', '')}".strip(),
-            })
-
-            # Upsert each buyer
-            for party in doc_parties:
-                buyer_name, entity_type = _parse_buyer_name(party)
-                if not buyer_name or buyer_name in ("UNKNOWN", "N/A"):
-                    continue
-
-                entity_id = upsert_entity(buyer_name, entity_type, extra={
-                    "address": party.get("addr1", ""),
-                    "city": party.get("city", ""),
-                    "state": party.get("state", "NY"),
-                    "zip_code": party.get("zip", ""),
-                    "raw_data": {"acris_party": party, "acris_legal": legal},
+            try:
+                # Upsert property
+                borough_names = {"1": "MANHATTAN", "2": "BRONX", "3": "BROOKLYN", "4": "QUEENS", "5": "STATEN ISLAND"}
+                property_id = upsert_property(bbl, {
+                    "borough": borough_names.get(str(legal.get("borough", "")), ""),
+                    "block": str(legal.get("block", "")).zfill(5),
+                    "lot": str(legal.get("lot", "")).zfill(4),
+                    "street_name": legal.get("street_name", ""),
+                    "house_number": legal.get("address_number", ""),
+                    "address": f"{legal.get('address_number', '')} {legal.get('street_name', '')}".strip(),
                 })
 
-                upsert_property_role(property_id, entity_id, "owner", "acris", extra={
-                    "raw_data": {"document_id": doc_id},
-                })
+                # Upsert each buyer
+                for party in doc_parties:
+                    buyer_name, entity_type = _parse_buyer_name(party)
+                    if not buyer_name or buyer_name in ("UNKNOWN", "N/A"):
+                        continue
 
-            mark_seen("acris_deed", doc_id)
-            stats["records_created"] += 1
+                    entity_id = upsert_entity(buyer_name, entity_type, extra={
+                        "address": party.get("addr1", ""),
+                        "city": party.get("city", ""),
+                        "state": party.get("state", "NY"),
+                        "zip_code": party.get("zip", ""),
+                        "raw_data": {"acris_party": party, "acris_legal": legal},
+                    })
+
+                    upsert_property_role(property_id, entity_id, "owner", "acris", extra={
+                        "raw_data": {"document_id": doc_id},
+                    })
+
+                mark_seen("acris_deed", doc_id)
+                stats["records_created"] += 1
+
+            except _TRANSIENT_NET_ERRORS as e:
+                log.warning(
+                    "acris.transient_skip",
+                    doc_id=doc_id,
+                    error=f"{type(e).__name__}: {e}".rstrip(": "),
+                )
+                continue
 
         finish_ingestion_log(log_id, stats)
         log.info("acris.complete", **stats)

@@ -30,6 +30,12 @@ from database.retry import retry_external
 
 log = structlog.get_logger(__name__)
 
+# Transient network errors caught inside per-row loops so a single dropped
+# Supabase connection doesn't kill a multi-hundred-thousand-row ingestion.
+# Skipped rows aren't mark_seen'd, so they re-attempt on the next pipeline
+# run. Real HTTP errors (HTTPStatusError) and code bugs still propagate.
+_TRANSIENT_NET_ERRORS = (httpx.NetworkError, httpx.TimeoutException)
+
 # HPD contact types → our entity types
 CONTACT_TYPE_MAP = {
     "CorporateOwner":  "llc",
@@ -118,72 +124,81 @@ async def ingest_hpd_contacts():
             if contact_type not in CONTACT_TYPE_MAP:
                 continue  # skip types we don't care about
 
-            # Build a dedup key from registration + contact type + name
-            external_id = f"{reg_id}_{contact_type}_{contact.get('firstname', '')}_{contact.get('lastname', '')}_{contact.get('corporationname', '')}"
-            chk = checksum({k: contact.get(k, "") for k in ["firstname", "lastname", "corporationname", "businesshousenumber", "businessstreetname"]})
+            try:
+                # Build a dedup key from registration + contact type + name
+                external_id = f"{reg_id}_{contact_type}_{contact.get('firstname', '')}_{contact.get('lastname', '')}_{contact.get('corporationname', '')}"
+                chk = checksum({k: contact.get(k, "") for k in ["firstname", "lastname", "corporationname", "businesshousenumber", "businessstreetname"]})
 
-            if already_seen("hpd_contact", external_id, chk):
-                stats["records_skipped"] += 1
-                continue
+                if already_seen("hpd_contact", external_id, chk):
+                    stats["records_skipped"] += 1
+                    continue
 
-            # --- Determine entity name ---
-            corp_name = contact.get("corporationname", "").strip()
-            first = contact.get("firstname", "").strip()
-            last = contact.get("lastname", "").strip()
-            entity_name = corp_name if corp_name else f"{first} {last}".strip()
+                # --- Determine entity name ---
+                corp_name = contact.get("corporationname", "").strip()
+                first = contact.get("firstname", "").strip()
+                last = contact.get("lastname", "").strip()
+                entity_name = corp_name if corp_name else f"{first} {last}".strip()
 
-            if not entity_name:
+                if not entity_name:
+                    mark_seen("hpd_contact", external_id, chk)
+                    continue
+
+                entity_type = CONTACT_TYPE_MAP[contact_type]
+                role = ROLE_MAP.get(contact_type, "owner")
+
+                # --- Build entity address ---
+                addr_parts = [
+                    contact.get("businesshousenumber", ""),
+                    contact.get("businessstreetname", ""),
+                ]
+                entity_address = " ".join(p for p in addr_parts if p).strip()
+
+                # --- Upsert Entity ---
+                entity_id = upsert_entity(entity_name, entity_type, extra={
+                    "address": entity_address or None,
+                    "zip_code": contact.get("businesszip", None),
+                    "state": contact.get("businessstate", "NY") or "NY",
+                })
+
+                # --- Upsert Contact (if individual with name) ---
+                if first and last:
+                    upsert_contact(entity_id, {
+                        "first_name": first,
+                        "last_name": last,
+                        "full_name": f"{first} {last}",
+                        "source": "hpd",
+                        "confidence": 0.9,
+                    })
+
+                # --- Upsert Property ---
+                # We need to build a BBL (borough+block+lot) from HPD reg to link property
+                # HPD contacts table doesn't have BBL directly — we join via registrationid
+                # We'll store the reg_id on the entity for now and resolve BBL in a separate pass
+                # For now, store minimal property linkage
+
+                # Try to get building info from the contact row itself
+                bldg_id = contact.get("buildingid", "")
+                if bldg_id:
+                    bbl = f"hpd_bldg_{bldg_id}"  # Placeholder until we join with registrations table
+                    property_id = upsert_property(bbl, {
+                        "hpd_reg_id": reg_id,
+                        "raw_data": {
+                            "hpd_registration_id": reg_id,
+                            "hpd_building_id": bldg_id,
+                        },
+                    })
+                    upsert_property_role(property_id, entity_id, role, "hpd")
+
                 mark_seen("hpd_contact", external_id, chk)
+                stats["records_created"] += 1
+
+            except _TRANSIENT_NET_ERRORS as e:
+                log.warning(
+                    "hpd_contacts.transient_skip",
+                    reg_id=reg_id,
+                    error=f"{type(e).__name__}: {e}".rstrip(": "),
+                )
                 continue
-
-            entity_type = CONTACT_TYPE_MAP[contact_type]
-            role = ROLE_MAP.get(contact_type, "owner")
-
-            # --- Build entity address ---
-            addr_parts = [
-                contact.get("businesshousenumber", ""),
-                contact.get("businessstreetname", ""),
-            ]
-            entity_address = " ".join(p for p in addr_parts if p).strip()
-
-            # --- Upsert Entity ---
-            entity_id = upsert_entity(entity_name, entity_type, extra={
-                "address": entity_address or None,
-                "zip_code": contact.get("businesszip", None),
-                "state": contact.get("businessstate", "NY") or "NY",
-            })
-
-            # --- Upsert Contact (if individual with name) ---
-            if first and last:
-                upsert_contact(entity_id, {
-                    "first_name": first,
-                    "last_name": last,
-                    "full_name": f"{first} {last}",
-                    "source": "hpd",
-                    "confidence": 0.9,
-                })
-
-            # --- Upsert Property ---
-            # We need to build a BBL (borough+block+lot) from HPD reg to link property
-            # HPD contacts table doesn't have BBL directly — we join via registrationid
-            # We'll store the reg_id on the entity for now and resolve BBL in a separate pass
-            # For now, store minimal property linkage
-
-            # Try to get building info from the contact row itself
-            bldg_id = contact.get("buildingid", "")
-            if bldg_id:
-                bbl = f"hpd_bldg_{bldg_id}"  # Placeholder until we join with registrations table
-                property_id = upsert_property(bbl, {
-                    "hpd_reg_id": reg_id,
-                    "raw_data": {
-                        "hpd_registration_id": reg_id,
-                        "hpd_building_id": bldg_id,
-                    },
-                })
-                upsert_property_role(property_id, entity_id, role, "hpd")
-
-            mark_seen("hpd_contact", external_id, chk)
-            stats["records_created"] += 1
 
             if stats["records_fetched"] % 1000 == 0:
                 log.info("hpd.progress", **stats)
@@ -227,38 +242,47 @@ async def ingest_hpd_registrations():
             if not (boro and block and lot):
                 continue
 
-            bbl = f"{boro}{block}{lot}"
-            # The Socrata column is `zip`, not `zipcode`. The previous name
-            # silently returned None and left every property's zip_code NULL,
-            # which in turn made the zipcode allowlist's unknown-zip bypass
-            # match every entity. Adding zip to the checksum forces a
-            # re-ingest of rows that were stored without it.
-            zip_code = (reg.get("zip") or "").strip() or None
-            chk = checksum({"boro": boro, "block": block, "lot": lot, "zip": zip_code or ""})
+            try:
+                bbl = f"{boro}{block}{lot}"
+                # The Socrata column is `zip`, not `zipcode`. The previous name
+                # silently returned None and left every property's zip_code NULL,
+                # which in turn made the zipcode allowlist's unknown-zip bypass
+                # match every entity. Adding zip to the checksum forces a
+                # re-ingest of rows that were stored without it.
+                zip_code = (reg.get("zip") or "").strip() or None
+                chk = checksum({"boro": boro, "block": block, "lot": lot, "zip": zip_code or ""})
 
-            if already_seen("hpd_registration", reg_id, chk):
-                stats["records_skipped"] += 1
+                if already_seen("hpd_registration", reg_id, chk):
+                    stats["records_skipped"] += 1
+                    continue
+
+                borough_names = {"1": "MANHATTAN", "2": "BRONX", "3": "BROOKLYN", "4": "QUEENS", "5": "STATEN ISLAND"}
+
+                address = f"{reg.get('housenumber', '').strip()} {reg.get('streetname', '').strip()}".strip()
+
+                upsert_property(bbl, {
+                    "bbl": bbl,
+                    "borough": borough_names.get(str(boro), boro),
+                    "block": block,
+                    "lot": lot,
+                    "address": address,
+                    "zip_code": zip_code,
+                    "unit_count": reg.get("unitcount", None),
+                    "building_class": reg.get("buildingclassid", None),
+                    "hpd_reg_id": reg_id,
+                    "raw_data": reg,
+                })
+
+                mark_seen("hpd_registration", reg_id, chk)
+                stats["records_created"] += 1
+
+            except _TRANSIENT_NET_ERRORS as e:
+                log.warning(
+                    "hpd_registrations.transient_skip",
+                    reg_id=reg_id,
+                    error=f"{type(e).__name__}: {e}".rstrip(": "),
+                )
                 continue
-
-            borough_names = {"1": "MANHATTAN", "2": "BRONX", "3": "BROOKLYN", "4": "QUEENS", "5": "STATEN ISLAND"}
-
-            address = f"{reg.get('housenumber', '').strip()} {reg.get('streetname', '').strip()}".strip()
-
-            upsert_property(bbl, {
-                "bbl": bbl,
-                "borough": borough_names.get(str(boro), boro),
-                "block": block,
-                "lot": lot,
-                "address": address,
-                "zip_code": zip_code,
-                "unit_count": reg.get("unitcount", None),
-                "building_class": reg.get("buildingclassid", None),
-                "hpd_reg_id": reg_id,
-                "raw_data": reg,
-            })
-
-            mark_seen("hpd_registration", reg_id, chk)
-            stats["records_created"] += 1
 
         finish_ingestion_log(log_id, stats)
         log.info("hpd_registrations.complete", **stats)
@@ -271,8 +295,30 @@ async def ingest_hpd_registrations():
 
 
 async def run():
-    """Entry point: run both HPD jobs in sequence."""
+    """Entry point: run both HPD jobs.
+
+    Sub-jobs are run independently — a failure in registrations doesn't
+    block contacts (and vice versa). Each sub-job already records its
+    own status to ingestion_log, so the stage-level error surfaces via
+    aggregate re-raise at the end if any failed.
+    """
     log.info("hpd.starting")
-    await ingest_hpd_registrations()
-    await ingest_hpd_contacts()
+    errors: list[tuple[str, str]] = []
+
+    for name, fn in (
+        ("hpd_registrations", ingest_hpd_registrations),
+        ("hpd_contacts", ingest_hpd_contacts),
+    ):
+        try:
+            await fn()
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}".rstrip(": ")
+            log.error("hpd.subjob_failed", subjob=name, error=err, exc_info=True)
+            errors.append((name, err))
+
+    if errors:
+        # Aggregate so the orchestrator's stage_hpd_full marks the stage failed.
+        raise RuntimeError(
+            "hpd subjob(s) failed: " + "; ".join(f"{n}: {e}" for n, e in errors)
+        )
     log.info("hpd.done")
