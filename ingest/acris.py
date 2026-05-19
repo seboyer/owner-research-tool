@@ -257,8 +257,12 @@ async def ingest_acris_deeds():
         log.info("acris.complete", **stats)
 
     except Exception as e:
-        log.error("acris.error", error=str(e))
-        finish_ingestion_log(log_id, stats, status="failed", error=str(e))
+        # Capture exception type — str(e) is empty for some exceptions
+        # (asyncio.TimeoutError, bare Exception()), which produced blank
+        # error_message rows that were hard to debug.
+        err = f"{type(e).__name__}: {e}".rstrip(": ")
+        log.error("acris.error", error=err, exc_info=True)
+        finish_ingestion_log(log_id, stats, status="failed", error=err)
         raise
 
 

@@ -192,8 +192,12 @@ async def ingest_hpd_contacts():
         log.info("hpd.complete", **stats)
 
     except Exception as e:
-        log.error("hpd.error", error=str(e))
-        finish_ingestion_log(log_id, stats, status="failed", error=str(e))
+        # Capture exception type — str(e) is empty for some exceptions
+        # (e.g. asyncio.TimeoutError, bare Exception()), which left us
+        # with blank error_message rows that were hard to debug.
+        err = f"{type(e).__name__}: {e}".rstrip(": ")
+        log.error("hpd.error", error=err, exc_info=True)
+        finish_ingestion_log(log_id, stats, status="failed", error=err)
         raise
 
 
@@ -224,7 +228,13 @@ async def ingest_hpd_registrations():
                 continue
 
             bbl = f"{boro}{block}{lot}"
-            chk = checksum({"boro": boro, "block": block, "lot": lot})
+            # The Socrata column is `zip`, not `zipcode`. The previous name
+            # silently returned None and left every property's zip_code NULL,
+            # which in turn made the zipcode allowlist's unknown-zip bypass
+            # match every entity. Adding zip to the checksum forces a
+            # re-ingest of rows that were stored without it.
+            zip_code = (reg.get("zip") or "").strip() or None
+            chk = checksum({"boro": boro, "block": block, "lot": lot, "zip": zip_code or ""})
 
             if already_seen("hpd_registration", reg_id, chk):
                 stats["records_skipped"] += 1
@@ -240,7 +250,7 @@ async def ingest_hpd_registrations():
                 "block": block,
                 "lot": lot,
                 "address": address,
-                "zip_code": reg.get("zipcode", None),
+                "zip_code": zip_code,
                 "unit_count": reg.get("unitcount", None),
                 "building_class": reg.get("buildingclassid", None),
                 "hpd_reg_id": reg_id,
@@ -254,8 +264,9 @@ async def ingest_hpd_registrations():
         log.info("hpd_registrations.complete", **stats)
 
     except Exception as e:
-        log.error("hpd_registrations.error", error=str(e))
-        finish_ingestion_log(log_id, stats, status="failed", error=str(e))
+        err = f"{type(e).__name__}: {e}".rstrip(": ")
+        log.error("hpd_registrations.error", error=err, exc_info=True)
+        finish_ingestion_log(log_id, stats, status="failed", error=err)
         raise
 
 
