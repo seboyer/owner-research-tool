@@ -74,6 +74,8 @@ ADMIN_HTML = """<!DOCTYPE html>
   .btn:hover { background: #f3f4f6; }
   .btn-primary { background: #1a1a2e; color: #fff; border-color: #1a1a2e; }
   .btn-primary:hover { background: #2d2d4a; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn:disabled:hover { background: #1a1a2e; }
   .zip-controls { display: flex; gap: 8px; margin-bottom: 12px; }
   table { width: 100%; border-collapse: collapse; }
   th, td {
@@ -139,7 +141,11 @@ ADMIN_HTML = """<!DOCTYPE html>
   <div class="banner-item">Queue — llc_pierce: <strong id="q-llc">—</strong></div>
   <div class="banner-item">zoominfo: <strong id="q-zoo">—</strong></div>
   <div class="banner-item">multi_source: <strong id="q-ms">—</strong></div>
-  <button class="btn" onclick="loadStatus()" style="margin-left:auto">Refresh status</button>
+  <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
+    <button class="btn" onclick="loadStatus()">Refresh status</button>
+    <button id="btn-run-daily" class="btn btn-primary" onclick="triggerRun('daily')">Run Daily</button>
+    <button id="btn-run-weekly" class="btn btn-primary" onclick="triggerRun('weekly')">Run Weekly</button>
+  </div>
 </div>
 
 <main>
@@ -337,11 +343,67 @@ async function loadRuns() {
   }
 }
 
+// ── manual triggers ───────────────────────────────────────────────────────────
+
+let _pollTimer = null;
+
+function _setRunBtn(name, running) {
+  const btn = document.getElementById('btn-run-' + name);
+  if (!btn) return;
+  btn.disabled = running;
+  btn.textContent = running ? 'Running…' : ('Run ' + name.charAt(0).toUpperCase() + name.slice(1));
+}
+
+async function _pollRunStatus() {
+  try {
+    const r = await fetch('/admin/api/run-status');
+    const d = await r.json();
+    _setRunBtn('daily', d.daily);
+    _setRunBtn('weekly', d.weekly);
+    if (!d.daily && !d.weekly) {
+      clearInterval(_pollTimer);
+      _pollTimer = null;
+      loadRuns(); // refresh table after pipeline finishes
+    }
+  } catch(e) { /* ignore transient errors during polling */ }
+}
+
+async function loadRunStatus() {
+  try {
+    const r = await fetch('/admin/api/run-status');
+    const d = await r.json();
+    _setRunBtn('daily', d.daily);
+    _setRunBtn('weekly', d.weekly);
+    if ((d.daily || d.weekly) && !_pollTimer) {
+      _pollTimer = setInterval(_pollRunStatus, 3000);
+    }
+  } catch(e) { console.error('run-status error', e); }
+}
+
+async function triggerRun(name) {
+  _setRunBtn(name, true);
+  try {
+    const r = await fetch('/admin/run/' + name, {method: 'POST'});
+    if (r.status === 409) {
+      // already running — polling will track it
+    } else if (!r.ok) {
+      _setRunBtn(name, false);
+      alert('Failed to start ' + name + ' pipeline');
+      return;
+    }
+    if (!_pollTimer) _pollTimer = setInterval(_pollRunStatus, 3000);
+  } catch(e) {
+    _setRunBtn(name, false);
+    alert('Error: ' + e);
+  }
+}
+
 // ── init ──────────────────────────────────────────────────────────────────────
 
 loadStatus();
 loadZips();
 loadRuns();
+loadRunStatus();
 </script>
 </body>
 </html>
