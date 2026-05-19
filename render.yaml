@@ -1,13 +1,13 @@
 services:
-  - type: web                  # Web Service — exposes the Airtable webhook URL
+  - type: web                  # Web Service — exposes the Airtable webhook URL + admin UI.
     name: owner-research-tool
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter              # upgrade to standard/pro if the weekly HPD sync needs more RAM
+    plan: starter
 
-    # The FastAPI app boots the APScheduler in its lifespan handler. Cron jobs
-    # (daily/weekly auto-search) are only registered when AUTO_SEARCH_ENABLED=true.
-    # The /webhook/airtable endpoint always works, regardless of the toggle.
+    # The scheduler runs in the worker service below, NOT here. Keeping ingestion
+    # out of the web process means heavy sync DB calls can't block the event loop
+    # and trip Render's health check.
     healthCheckPath: /health
 
     envVars:
@@ -72,6 +72,64 @@ services:
         sync: false
 
       # --- Pipeline settings ---
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+
+  # ============================================================
+  # Worker — runs APScheduler + ingestion. No HTTP exposure, no
+  # health check, so heavy blocking DB calls during ingestion
+  # can't kill the process the way they did on the web service.
+  # ============================================================
+  - type: worker
+    name: owner-research-tool-scheduler
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    dockerCommand: python main.py schedule
+
+    envVars:
+      # NOTE: env var values must be set on this service in the Render
+      # dashboard the same way they're set on the web service. Render's
+      # Blueprint Sync does NOT auto-copy `sync: false` values between
+      # services.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: AUTO_SEARCH_ENABLED
+        value: "false"
+      - key: WEEKLY_PIPELINE_DAY
+        value: "tue"
+      - key: NYC_OPENDATA_APP_TOKEN
+        sync: false
+      - key: BATCHDATA_API_KEY
+        sync: false
+      - key: APOLLO_API_KEY
+        sync: false
+      - key: HUNTER_API_KEY
+        sync: false
+      - key: GOOGLE_PLACES_API_KEY
+        sync: false
+      - key: PROXYCURL_API_KEY
+        sync: false
+      - key: WHITEPAGES_API_KEY
+        sync: false
+      - key: BROWSERLESS_API_KEY
+        sync: false
+      - key: SCRAPERAPI_KEY
+        sync: false
+      - key: ZOOMINFO_CLIENT_ID
+        sync: false
+      - key: ZOOMINFO_PRIVATE_KEY
+        sync: false
+      - key: ZOOMINFO_USERNAME
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
       - key: ENVIRONMENT
         value: production
       - key: LOG_LEVEL

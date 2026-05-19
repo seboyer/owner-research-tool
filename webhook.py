@@ -45,18 +45,17 @@ from pydantic import BaseModel, Field
 from admin.routes import router as admin_router
 from config import config, validate_required_config
 from pipeline.single_address import research_address, AddressResult
-from scheduler import build_async_scheduler, register_jobs
 
 log = structlog.get_logger(__name__)
 
 
 # ============================================================
-# Lifespan: start the APScheduler alongside FastAPI
+# Lifespan: log config + boot. The scheduler runs in a separate
+# Render worker service (see render.yaml), NOT in this process.
 # ============================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Boot the scheduler when the FastAPI app starts; shut it down on exit."""
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(
             getattr(logging, config.LOG_LEVEL, logging.INFO)
@@ -69,17 +68,11 @@ async def lifespan(app: FastAPI):
         # to come up so Render can show what's wrong.
         log.error("config.missing_required_keys", missing=missing)
 
-    sched = build_async_scheduler()
-    registered = register_jobs(sched)
-    sched.start()
-    log.info("webhook.startup", auto_search=config.AUTO_SEARCH_ENABLED, jobs=registered)
-    app.state.scheduler = sched
+    log.info("webhook.startup", auto_search=config.AUTO_SEARCH_ENABLED)
 
-    try:
-        yield
-    finally:
-        log.info("webhook.shutdown")
-        sched.shutdown(wait=False)
+    yield
+
+    log.info("webhook.shutdown")
 
 
 app = FastAPI(
@@ -233,24 +226,11 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Lightweight health check — verifies env + DB reachability."""
-    missing = validate_required_config()
-    db_ok = True
-    db_error: Optional[str] = None
-    try:
-        from database.client import db
-        db().table("entities").select("id", count="exact").limit(1).execute()
-    except Exception as e:
-        db_ok = False
-        db_error = str(e)[:200]
-
-    return {
-        "status": "ok" if (not missing and db_ok) else "degraded",
-        "auto_search_enabled": config.AUTO_SEARCH_ENABLED,
-        "missing_config": missing,
-        "database_reachable": db_ok,
-        "database_error": db_error,
-    }
+    """Trivial liveness check. Must not touch the database — Render polls this
+    every few seconds with a 5s timeout, and sync DB calls would block the
+    event loop and fail the check during heavy traffic. For deeper checks
+    (config + DB reachability), use /admin/api/status which is auth-protected."""
+    return {"status": "ok"}
 
 
 @app.post("/webhook/airtable", status_code=202)
