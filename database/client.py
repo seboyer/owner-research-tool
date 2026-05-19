@@ -395,6 +395,16 @@ def mark_enrichment_failed(entity_id: str, enrichment_type: str, error: str):
 # ============================================================
 
 def start_ingestion_log(source: str) -> str:
+    # Close any prior 'running' rows for this source as orphans before starting a
+    # fresh run. Cron jobs run with max_instances=1 and manual triggers have their
+    # own in-memory lock, so any leftover 'running' row at this point means a prior
+    # run died without reaching its finally/except branch.
+    db().table("ingestion_log").update({
+        "status": "failed",
+        "run_finished_at": "now()",
+        "error_message": "orphaned — superseded by a new run",
+    }).eq("source", source).eq("status", "running").execute()
+
     res = db().table("ingestion_log").insert({"source": source, "status": "running"}).execute()
     return res.data[0]["id"]
 
