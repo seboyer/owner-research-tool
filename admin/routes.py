@@ -156,7 +156,7 @@ async def api_zipcodes(_auth: None = Depends(_auth)) -> list[dict]:
             "updated_at": entry.get("updated_at"),
         })
 
-    result.sort(key=lambda x: (-x["property_count"], x["zip_code"]))
+    result.sort(key=lambda x: x["zip_code"])
     return result
 
 
@@ -186,6 +186,45 @@ async def api_zipcode_bulk(
     ).neq("zip_code", "").execute()
     invalidate_cache()
     log.info("admin.zipcodes.bulk_toggle", enabled=enabled)
+    return {"ok": True}
+
+
+# ============================================================
+# Boroughs (fallback gate for properties with NULL zip)
+# ============================================================
+
+class BoroughToggleBody(BaseModel):
+    borough_code: str
+    enabled: bool
+
+
+@router.get("/api/boroughs")
+async def api_boroughs(_auth: None = Depends(_auth)) -> list[dict]:
+    """Return the 5 borough switches with their current enabled state."""
+    res = (
+        db()
+        .table("borough_allowlist")
+        .select("borough_code, borough_name, enabled, updated_at")
+        .execute()
+    )
+    rows = res.data or []
+    rows.sort(key=lambda r: r["borough_code"])
+    return rows
+
+
+@router.post("/api/boroughs/toggle")
+async def api_borough_toggle(
+    body: BoroughToggleBody,
+    _auth: None = Depends(_auth),
+) -> dict:
+    """Enable or disable a single borough fallback switch."""
+    if body.borough_code not in ("1", "2", "3", "4", "5"):
+        raise HTTPException(status_code=400, detail="borough_code must be '1'-'5'")
+    db().table("borough_allowlist").update(
+        {"enabled": body.enabled, "updated_at": "now()"}
+    ).eq("borough_code", body.borough_code).execute()
+    invalidate_cache()
+    log.info("admin.borough.toggled", borough_code=body.borough_code, enabled=body.enabled)
     return {"ok": True}
 
 
