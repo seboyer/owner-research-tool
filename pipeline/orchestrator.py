@@ -87,6 +87,36 @@ async def stage_multi_source_enrich(batch_size: int = 100):
 
 
 # ============================================================
+# Stage wrapper — per-stage timeout so a stuck job can't run forever
+# ============================================================
+
+# Hard timeouts in seconds. If a stage exceeds this, asyncio.TimeoutError is
+# raised and the next start_ingestion_log() call for the same source closes
+# any orphaned 'running' row.
+STAGE_TIMEOUTS: dict[str, int] = {
+    "hpd_full":             4 * 3600,   # ~400k contacts + registrations
+    "acris_delta":          1 * 3600,   # normal: minutes
+    "wow_portfolio":        2 * 3600,
+    "llc_piercing":         2 * 3600,
+    "acris_pdf_pierce":     2 * 3600,   # Claude vision is slow
+    "zoominfo_enrich":      1 * 3600,
+    "multi_source_enrich":  2 * 3600,
+}
+
+_DEFAULT_STAGE_TIMEOUT = 3600
+
+
+async def _run_stage_with_timeout(stage_name: str, stage_fn: Callable) -> None:
+    """Run a stage with a hard timeout. Caller is responsible for catching exceptions."""
+    timeout = STAGE_TIMEOUTS.get(stage_name, _DEFAULT_STAGE_TIMEOUT)
+    try:
+        await asyncio.wait_for(stage_fn(), timeout=timeout)
+    except asyncio.TimeoutError:
+        log.error("pipeline.stage_timeout", stage=stage_name, timeout_s=timeout)
+        raise
+
+
+# ============================================================
 # Composite Pipelines
 # ============================================================
 
@@ -114,7 +144,7 @@ async def run_initial_full_load():
     for stage_name, stage_fn in stages:
         try:
             log.info("pipeline.running_stage", stage=stage_name)
-            await stage_fn()
+            await _run_stage_with_timeout(stage_name, stage_fn)
         except Exception as e:
             log.error("pipeline.stage_failed",
                       stage=stage_name, error=str(e))
@@ -142,7 +172,7 @@ async def run_daily_pipeline():
 
     for stage_name, stage_fn in stages:
         try:
-            await stage_fn()
+            await _run_stage_with_timeout(stage_name, stage_fn)
         except Exception as e:
             log.error("pipeline.daily_stage_failed",
                       stage=stage_name, error=str(e))
@@ -153,16 +183,23 @@ async def run_daily_pipeline():
 
 async def run_weekly_pipeline():
     """
-    Weekly pipeline — heavier sync run on Sundays.
+    Weekly pipeline — heavier sync run on Tuesday at 2 AM ET.
     Refreshes HPD + WoW data, which change slowly.
     """
     log.info("pipeline.weekly_start")
 
-    # Run heavy ingestion jobs
-    await stage_hpd_full()
-    await stage_wow_portfolio()
+    stages = [
+        ("hpd_full",      stage_hpd_full),
+        ("wow_portfolio", stage_wow_portfolio),
+    ]
+    for stage_name, stage_fn in stages:
+        try:
+            await _run_stage_with_timeout(stage_name, stage_fn)
+        except Exception as e:
+            log.error("pipeline.weekly_stage_failed",
+                      stage=stage_name, error=str(e))
 
-    # Then run the daily pipeline on top
+    # Then run the daily pipeline on top (already wraps its own stages).
     await run_daily_pipeline()
 
     log.info("pipeline.weekly_complete")
@@ -174,10 +211,18 @@ async def run_enrichment_only():
     but enrichment is behind (e.g., after adding a new API key).
     """
     log.info("pipeline.enrichment_only_start")
-    await stage_llc_piercing(batch_size=25)
-    await stage_acris_pdf_pierce(batch_size=20)
-    await stage_zoominfo_enrich()
-    await stage_multi_source_enrich(batch_size=100)
+    stages = [
+        ("llc_piercing",       lambda: stage_llc_piercing(batch_size=25)),
+        ("acris_pdf_pierce",   lambda: stage_acris_pdf_pierce(batch_size=20)),
+        ("zoominfo_enrich",    lambda: stage_zoominfo_enrich()),
+        ("multi_source_enrich",lambda: stage_multi_source_enrich(batch_size=100)),
+    ]
+    for stage_name, stage_fn in stages:
+        try:
+            await _run_stage_with_timeout(stage_name, stage_fn)
+        except Exception as e:
+            log.error("pipeline.enrichment_only_stage_failed",
+                      stage=stage_name, error=str(e))
     log.info("pipeline.enrichment_only_complete")
 
 
