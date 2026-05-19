@@ -416,3 +416,74 @@ def finish_ingestion_log(log_id: str, stats: dict, status: str = "success", erro
         "error_message": error,
         **stats,
     }).eq("id", log_id).execute()
+
+
+# ============================================================
+# Pipeline Triggers
+# Web service inserts; worker polls and runs. See migration 007.
+# ============================================================
+
+def request_pipeline_trigger(pipeline: str, requested_by: str = "admin_ui") -> dict:
+    """Queue a pipeline run. Returns the new row."""
+    res = db().table("pipeline_triggers").insert({
+        "pipeline": pipeline,
+        "requested_by": requested_by,
+    }).execute()
+    return res.data[0]
+
+
+def get_active_triggers() -> dict[str, str]:
+    """Return {pipeline: status} where status is 'pending', 'running', or 'idle'.
+    Used by the admin UI to render button state."""
+    res = (
+        db()
+        .table("pipeline_triggers")
+        .select("pipeline, status")
+        .in_("status", ["pending", "running"])
+        .execute()
+    )
+    out = {"daily": "idle", "weekly": "idle"}
+    for r in (res.data or []):
+        # 'running' wins over 'pending' when both are present for the same pipeline.
+        if out[r["pipeline"]] != "running":
+            out[r["pipeline"]] = r["status"]
+    return out
+
+
+def claim_next_pipeline_trigger() -> dict | None:
+    """Atomically claim the oldest pending trigger by flipping it to 'running'.
+    Returns the row, or None if nothing is pending. The conditional UPDATE
+    (eq status='pending') makes this safe against concurrent claimers."""
+    sel = (
+        db()
+        .table("pipeline_triggers")
+        .select("*")
+        .eq("status", "pending")
+        .order("requested_at")
+        .limit(1)
+        .execute()
+    )
+    if not sel.data:
+        return None
+
+    row_id = sel.data[0]["id"]
+    upd = (
+        db()
+        .table("pipeline_triggers")
+        .update({"status": "running", "started_at": "now()"})
+        .eq("id", row_id)
+        .eq("status", "pending")
+        .execute()
+    )
+    if not upd.data:
+        # Lost the race to another claimer.
+        return None
+    return upd.data[0]
+
+
+def finish_pipeline_trigger(trigger_id: int, success: bool, error: str | None = None) -> None:
+    db().table("pipeline_triggers").update({
+        "status": "done" if success else "failed",
+        "finished_at": "now()",
+        "error_message": error,
+    }).eq("id", trigger_id).execute()

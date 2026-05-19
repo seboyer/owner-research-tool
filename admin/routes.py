@@ -214,31 +214,37 @@ async def api_runs(_auth: None = Depends(_auth)) -> list[dict]:
 # ============================================================
 # Manual pipeline triggers
 #
-# Disabled in the web service: running the pipeline in-process blocks the
-# event loop with sync Supabase calls and trips Render's /health timeout
-# (the failure mode that prompted the worker-split refactor). The scheduler
-# now lives in a separate worker service. A follow-up will route manual
-# triggers through a DB-backed queue that the worker polls.
+# The web service can't run the pipeline directly — sync DB calls would
+# block the event loop and trip Render's /health timeout. Instead we
+# insert into pipeline_triggers and the worker service polls it every
+# 30s (see scheduler._job_poll_triggers).
 # ============================================================
-
-_TRIGGERS_DISABLED_MSG = (
-    "Manual pipeline triggers are temporarily disabled. The scheduler "
-    "runs in a separate worker service; manual triggers will be re-enabled "
-    "once they route through that worker. Until then, use the cron schedule."
-)
-
 
 @router.get("/api/run-status")
 async def api_run_status(_auth: None = Depends(_auth)) -> dict:
-    """Always returns not-running while manual triggers are disabled."""
-    return {"daily": False, "weekly": False, "disabled": True}
+    """Return current trigger state per pipeline: 'idle', 'pending', or 'running'."""
+    from database.client import get_active_triggers
+    return get_active_triggers()
+
+
+def _queue_trigger(pipeline: str) -> dict:
+    from database.client import get_active_triggers, request_pipeline_trigger
+    active = get_active_triggers()
+    if active.get(pipeline) in ("pending", "running"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{pipeline.capitalize()} pipeline is already {active[pipeline]}",
+        )
+    row = request_pipeline_trigger(pipeline)
+    log.info("admin.manual_run.queued", pipeline=pipeline, trigger_id=row["id"])
+    return {"ok": True, "queued": pipeline, "trigger_id": row["id"]}
 
 
 @router.post("/run/daily")
 async def run_daily(_auth: None = Depends(_auth)) -> dict:
-    raise HTTPException(status_code=503, detail=_TRIGGERS_DISABLED_MSG)
+    return _queue_trigger("daily")
 
 
 @router.post("/run/weekly")
 async def run_weekly(_auth: None = Depends(_auth)) -> dict:
-    raise HTTPException(status_code=503, detail=_TRIGGERS_DISABLED_MSG)
+    return _queue_trigger("weekly")

@@ -1,30 +1,23 @@
 """
 scheduler.py — APScheduler-based persistent job scheduler
 
-Two ways to use:
-
-  1. Standalone (legacy):
-        python scheduler.py
-     Creates its own asyncio loop and runs the BlockingScheduler. Used only
-     for local testing of the cron jobs in isolation.
-
-  2. Inside the FastAPI app (production):
-        from scheduler import build_async_scheduler, register_jobs
-        sched = build_async_scheduler()
-        register_jobs(sched)
-        sched.start()
-     This is what the Render Web Service uses — the scheduler shares the
-     FastAPI event loop and runs alongside the webhook listener.
+Runs in the dedicated Render worker service via `python main.py schedule`.
+The web service does NOT run the scheduler (see render.yaml + webhook.py).
 
 Cron jobs (only registered if AUTO_SEARCH_ENABLED=true):
   - Daily   (3:00 AM ET): ACRIS delta + enrichment
-  - Weekly  (Sun 2:00 AM ET): HPD full sync + WoW + daily pipeline
-  - Hourly health check: logs queue depth (always registered)
+  - Weekly  (configurable day, 2:00 AM ET): HPD + WoW + daily pipeline
+
+Always-on jobs:
+  - Hourly health check: logs queue depth
+  - 30s trigger poller: drains the pipeline_triggers table that the web
+    service inserts into when admins click Run Daily/Run Weekly.
 """
 
 import asyncio
 import logging
 import signal
+import threading
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -36,6 +29,11 @@ from config import config
 
 log = structlog.get_logger(__name__)
 
+# Single-flight pipeline lock. Cron daily/weekly and the manual-trigger
+# polling job all acquire this before invoking the orchestrator so that
+# two pipeline runs can't overlap in the worker.
+_pipeline_lock = threading.Lock()
+
 
 # ============================================================
 # Job wrappers
@@ -43,26 +41,68 @@ log = structlog.get_logger(__name__)
 
 async def _job_daily():
     """Daily: ACRIS delta + enrichment."""
-    from pipeline.orchestrator import run_daily_pipeline
-    log.info("scheduler.job_start", job="daily")
+    if not _pipeline_lock.acquire(blocking=False):
+        log.info("scheduler.daily_skipped_pipeline_busy")
+        return
     try:
-        await run_daily_pipeline()
-        log.info("scheduler.job_done", job="daily")
-    except Exception as e:
-        log.error("scheduler.job_error", job="daily", error=str(e))
-        raise
+        from pipeline.orchestrator import run_daily_pipeline
+        log.info("scheduler.job_start", job="daily")
+        try:
+            await run_daily_pipeline()
+            log.info("scheduler.job_done", job="daily")
+        except Exception as e:
+            log.error("scheduler.job_error", job="daily", error=str(e))
+            raise
+    finally:
+        _pipeline_lock.release()
 
 
 async def _job_weekly():
     """Weekly: Full HPD + WoW + enrichment."""
-    from pipeline.orchestrator import run_weekly_pipeline
-    log.info("scheduler.job_start", job="weekly")
+    if not _pipeline_lock.acquire(blocking=False):
+        log.info("scheduler.weekly_skipped_pipeline_busy")
+        return
     try:
-        await run_weekly_pipeline()
-        log.info("scheduler.job_done", job="weekly")
-    except Exception as e:
-        log.error("scheduler.job_error", job="weekly", error=str(e))
-        raise
+        from pipeline.orchestrator import run_weekly_pipeline
+        log.info("scheduler.job_start", job="weekly")
+        try:
+            await run_weekly_pipeline()
+            log.info("scheduler.job_done", job="weekly")
+        except Exception as e:
+            log.error("scheduler.job_error", job="weekly", error=str(e))
+            raise
+    finally:
+        _pipeline_lock.release()
+
+
+async def _job_poll_triggers():
+    """Poll pipeline_triggers every 30s and run any pending request.
+    Skips if another pipeline is already running on this worker."""
+    if not _pipeline_lock.acquire(blocking=False):
+        return  # pipeline already busy; try again next tick
+
+    try:
+        from database.client import claim_next_pipeline_trigger, finish_pipeline_trigger
+        trigger = claim_next_pipeline_trigger()
+        if not trigger:
+            return
+
+        log.info("scheduler.manual_trigger_claimed",
+                 id=trigger["id"], pipeline=trigger["pipeline"])
+        try:
+            if trigger["pipeline"] == "daily":
+                from pipeline.orchestrator import run_daily_pipeline
+                await run_daily_pipeline()
+            else:
+                from pipeline.orchestrator import run_weekly_pipeline
+                await run_weekly_pipeline()
+            finish_pipeline_trigger(trigger["id"], success=True)
+            log.info("scheduler.manual_trigger_done", id=trigger["id"])
+        except Exception as e:
+            finish_pipeline_trigger(trigger["id"], success=False, error=str(e))
+            log.error("scheduler.manual_trigger_failed", id=trigger["id"], error=str(e))
+    finally:
+        _pipeline_lock.release()
 
 
 def _job_health_check():
@@ -143,6 +183,18 @@ def register_jobs(scheduler) -> list[str]:
     )
     registered.append("health_check")
 
+    # Always register the manual-trigger poller — independent of AUTO_SEARCH_ENABLED
+    # so admins can run a one-off pipeline even when scheduled cron is disabled.
+    scheduler.add_job(
+        _job_poll_triggers,
+        trigger=IntervalTrigger(seconds=30),
+        id="poll_triggers",
+        name="Manual trigger poller",
+        max_instances=1,
+        coalesce=True,
+    )
+    registered.append("poll_triggers")
+
     return registered
 
 
@@ -202,6 +254,14 @@ def main():
         _job_health_check,
         trigger=IntervalTrigger(hours=1),
         id="health_check",
+    )
+
+    scheduler.add_job(
+        _run_async(_job_poll_triggers),
+        trigger=IntervalTrigger(seconds=30),
+        id="poll_triggers",
+        max_instances=1,
+        coalesce=True,
     )
 
     # Graceful shutdown on SIGTERM (Render sends this on deploy).
