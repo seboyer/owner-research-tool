@@ -149,8 +149,20 @@ ADMIN_HTML = """<!DOCTYPE html>
 </div>
 
 <main>
-  <!-- ===== LEFT: Zipcode toggles ===== -->
+  <!-- ===== LEFT: Allowlists ===== -->
   <section>
+    <h2>Borough Fallback <span style="font-weight:400;color:#6b7280;font-size:12px;">(only gates properties with no zip)</span></h2>
+    <div id="boro-loading" class="loading">Loading&hellip;</div>
+    <table id="boro-table" style="display:none; margin-bottom:24px;">
+      <thead>
+        <tr>
+          <th>Borough</th>
+          <th>Enabled</th>
+        </tr>
+      </thead>
+      <tbody id="boro-body"></tbody>
+    </table>
+
     <h2>Zipcode Allowlist</h2>
     <div class="zip-controls">
       <button class="btn btn-primary" onclick="bulkToggle(true)">Enable all</button>
@@ -413,9 +425,54 @@ async function triggerRun(name) {
   }
 }
 
+// ── borough fallback ──────────────────────────────────────────────────────────
+
+async function loadBoroughs() {
+  try {
+    const r = await fetch('/admin/api/boroughs');
+    if (!r.ok) throw new Error(r.status);
+    const rows = await r.json();
+    const tbody = document.getElementById('boro-body');
+    tbody.innerHTML = '';
+    rows.forEach(b => {
+      const tr = document.createElement('tr');
+      const chkId = 'chk-boro-' + b.borough_code;
+      tr.innerHTML = `
+        <td>${b.borough_name}</td>
+        <td>
+          <label class="toggle">
+            <input type="checkbox" id="${chkId}" ${b.enabled ? 'checked' : ''}
+              onchange="toggleBorough('${b.borough_code}', this.checked)">
+            <span class="slider"></span>
+          </label>
+        </td>`;
+      tbody.appendChild(tr);
+    });
+    document.getElementById('boro-loading').style.display = 'none';
+    document.getElementById('boro-table').style.display = '';
+  } catch(e) {
+    document.getElementById('boro-loading').textContent = 'Error loading boroughs: ' + e;
+  }
+}
+
+async function toggleBorough(code, enabled) {
+  try {
+    const r = await fetch('/admin/api/boroughs/toggle', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({borough_code: code, enabled}),
+    });
+    if (!r.ok) throw new Error(r.status);
+  } catch(e) {
+    alert('Failed to toggle borough ' + code + ': ' + e);
+    loadBoroughs();
+  }
+}
+
 // ── init ──────────────────────────────────────────────────────────────────────
 
 loadStatus();
+loadBoroughs();
 loadZips();
 loadRuns();
 loadRunStatus();
