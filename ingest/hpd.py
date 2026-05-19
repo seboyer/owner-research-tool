@@ -14,6 +14,7 @@ Contact types we care about:
 """
 
 import asyncio
+from datetime import date
 from typing import AsyncIterator
 
 import httpx
@@ -104,10 +105,11 @@ async def ingest_hpd_contacts():
     stats = {"records_fetched": 0, "records_created": 0, "records_updated": 0, "records_skipped": 0}
 
     try:
-        # Only process active registrations to avoid stale data
-        where_clause = "lifecyclestage='Active'"
-
-        async for contact in paginate(config.HPD_CONTACTS_URL, where=where_clause):
+        # The HPD Contacts dataset (feu5-w2e2) has no date column to filter on,
+        # so we pull all contacts and let already_seen() dedup against prior runs.
+        # Stale contacts attached to expired registrations are filtered downstream
+        # via property_roles.is_current.
+        async for contact in paginate(config.HPD_CONTACTS_URL):
             stats["records_fetched"] += 1
 
             reg_id = contact.get("registrationid", "")
@@ -205,7 +207,10 @@ async def ingest_hpd_registrations():
     stats = {"records_fetched": 0, "records_created": 0, "records_skipped": 0}
 
     try:
-        where_clause = "lifecyclestage='Active'"
+        # tesw-yqqr has no lifecyclestage column. Filter on registrationenddate
+        # to skip expired registrations — currently-valid ones have an end date
+        # in the future (HPD registrations are renewed annually).
+        where_clause = f"registrationenddate >= '{date.today().isoformat()}'"
 
         async for reg in paginate(config.HPD_REGISTRATIONS_URL, where=where_clause):
             stats["records_fetched"] += 1
