@@ -30,11 +30,15 @@ from database.retry import retry_external
 
 log = structlog.get_logger(__name__)
 
-# Transient network errors caught inside per-row loops so a single dropped
+# Transient transport errors caught inside per-row loops so a single dropped
 # Supabase connection doesn't kill a multi-hundred-thousand-row ingestion.
 # Skipped rows aren't mark_seen'd, so they re-attempt on the next pipeline
-# run. Real HTTP errors (HTTPStatusError) and code bugs still propagate.
-_TRANSIENT_NET_ERRORS = (httpx.NetworkError, httpx.TimeoutException)
+# run. We catch httpx.TransportError (the parent of NetworkError,
+# TimeoutException, ProtocolError, and ProxyError) — RemoteProtocolError in
+# particular lives under ProtocolError, NOT NetworkError, so the narrower
+# tuple we used previously missed exactly the error we kept hitting.
+# Real HTTP responses (HTTPStatusError) and code bugs still propagate.
+_TRANSIENT_NET_ERRORS = (httpx.TransportError,)
 
 # HPD contact types → our entity types
 CONTACT_TYPE_MAP = {
