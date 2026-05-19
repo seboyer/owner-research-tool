@@ -143,10 +143,8 @@ ADMIN_HTML = """<!DOCTYPE html>
   <div class="banner-item">multi_source: <strong id="q-ms">—</strong></div>
   <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
     <button class="btn" onclick="loadStatus()">Refresh status</button>
-    <button id="btn-run-daily" class="btn btn-primary" onclick="triggerRun('daily')" disabled
-            title="Disabled — scheduler now runs in a worker service. Use the cron schedule.">Run Daily</button>
-    <button id="btn-run-weekly" class="btn btn-primary" onclick="triggerRun('weekly')" disabled
-            title="Disabled — scheduler now runs in a worker service. Use the cron schedule.">Run Weekly</button>
+    <button id="btn-run-daily" class="btn btn-primary" onclick="triggerRun('daily')">Run Daily</button>
+    <button id="btn-run-weekly" class="btn btn-primary" onclick="triggerRun('weekly')">Run Weekly</button>
   </div>
 </div>
 
@@ -349,11 +347,25 @@ async function loadRuns() {
 
 let _pollTimer = null;
 
-function _setRunBtn(name, running) {
+function _setRunBtn(name, state) {
+  // state is 'idle' | 'pending' | 'running'
   const btn = document.getElementById('btn-run-' + name);
   if (!btn) return;
-  btn.disabled = running;
-  btn.textContent = running ? 'Running…' : ('Run ' + name.charAt(0).toUpperCase() + name.slice(1));
+  const label = 'Run ' + name.charAt(0).toUpperCase() + name.slice(1);
+  if (state === 'running') {
+    btn.disabled = true;
+    btn.textContent = 'Running…';
+  } else if (state === 'pending') {
+    btn.disabled = true;
+    btn.textContent = 'Queued…';
+  } else {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+function _anyActive(d) {
+  return d.daily !== 'idle' || d.weekly !== 'idle';
 }
 
 async function _pollRunStatus() {
@@ -362,7 +374,7 @@ async function _pollRunStatus() {
     const d = await r.json();
     _setRunBtn('daily', d.daily);
     _setRunBtn('weekly', d.weekly);
-    if (!d.daily && !d.weekly) {
+    if (!_anyActive(d)) {
       clearInterval(_pollTimer);
       _pollTimer = null;
       loadRuns(); // refresh table after pipeline finishes
@@ -376,26 +388,27 @@ async function loadRunStatus() {
     const d = await r.json();
     _setRunBtn('daily', d.daily);
     _setRunBtn('weekly', d.weekly);
-    if ((d.daily || d.weekly) && !_pollTimer) {
-      _pollTimer = setInterval(_pollRunStatus, 3000);
+    if (_anyActive(d) && !_pollTimer) {
+      _pollTimer = setInterval(_pollRunStatus, 5000);
     }
   } catch(e) { console.error('run-status error', e); }
 }
 
 async function triggerRun(name) {
-  _setRunBtn(name, true);
+  _setRunBtn(name, 'pending');
   try {
     const r = await fetch('/admin/run/' + name, {method: 'POST'});
     if (r.status === 409) {
-      // already running — polling will track it
+      // already queued/running — polling will track it
     } else if (!r.ok) {
-      _setRunBtn(name, false);
-      alert('Failed to start ' + name + ' pipeline');
+      _setRunBtn(name, 'idle');
+      const err = await r.json().catch(() => ({}));
+      alert('Failed to queue ' + name + ': ' + (err.detail || r.status));
       return;
     }
-    if (!_pollTimer) _pollTimer = setInterval(_pollRunStatus, 3000);
+    if (!_pollTimer) _pollTimer = setInterval(_pollRunStatus, 5000);
   } catch(e) {
-    _setRunBtn(name, false);
+    _setRunBtn(name, 'idle');
     alert('Error: ' + e);
   }
 }
