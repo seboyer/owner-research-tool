@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from admin.allowlist import get_allowlist, invalidate_cache
+from admin.allowlist import _borough_from_bbl, get_allowlist, invalidate_cache
 from admin.template import ADMIN_HTML
 from config import config
 from database.client import db
@@ -244,9 +244,41 @@ class BoroughToggleBody(BaseModel):
     enabled: bool
 
 
+def _count_null_zip_properties_by_borough() -> dict[str, int]:
+    """Count NULL/empty-zip properties grouped by borough (BBL first digit).
+
+    These are exactly the properties whose enrichment is gated by the borough
+    fallback toggles, so the counts give admins useful "how many am I
+    affecting" context next to each switch.
+    """
+    page_size = 1000
+    offset = 0
+    counts: dict[str, int] = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
+    while True:
+        # Supabase .or_() lets us match zip_code IS NULL OR zip_code = ''
+        res = (
+            db()
+            .table("properties")
+            .select("bbl")
+            .or_("zip_code.is.null,zip_code.eq.")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        rows = res.data or []
+        for row in rows:
+            boro = _borough_from_bbl(row.get("bbl"))
+            if boro:
+                counts[boro] += 1
+        if len(rows) < page_size:
+            break
+        offset += page_size
+    return counts
+
+
 @router.get("/api/boroughs")
 async def api_boroughs(_auth: None = Depends(_auth)) -> list[dict]:
-    """Return the 5 borough switches with their current enabled state."""
+    """Return the 5 borough switches with their enabled state + count of
+    NULL-zip properties (the rows actually gated by each switch)."""
     res = (
         db()
         .table("borough_allowlist")
@@ -254,6 +286,11 @@ async def api_boroughs(_auth: None = Depends(_auth)) -> list[dict]:
         .execute()
     )
     rows = res.data or []
+
+    null_zip_counts = _count_null_zip_properties_by_borough()
+    for r in rows:
+        r["null_zip_property_count"] = null_zip_counts.get(r["borough_code"], 0)
+
     rows.sort(key=lambda r: r["borough_code"])
     return rows
 
