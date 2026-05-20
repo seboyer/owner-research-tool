@@ -477,18 +477,32 @@ async def pierce_entity(entity: dict) -> bool:
 
 async def run_batch(batch_size: int = 20):
     """
-    Drain the llc_pierce enrichment queue.
-
-    Pulls batches of `batch_size` from allowed_enrichment_queue (the
-    SQL-level zip/borough-filtered view) and processes them in a loop
-    until the queue is empty for currently-enabled zips/boroughs. The
-    orchestrator's per-stage timeout caps total runtime.
+    Drain the llc_pierce enrichment queue, respecting the per-run cost
+    cap (config.DAILY_ENRICHMENT_COST_CAP_USD). When the cap is hit the
+    loop exits and unprocessed entities stay in the queue for next run.
     """
+    from pipeline.orchestrator import get_cost_tracker, COST_PER_ENTITY
+
     log_id = start_ingestion_log("llc_piercing")
-    stats = {"records_fetched": 0, "records_created": 0, "records_skipped": 0}
+    stats = {
+        "records_fetched": 0,
+        "records_created": 0,
+        "records_skipped": 0,
+        "cost_estimated_usd": 0.0,
+        "stopped_by_cost_cap": False,
+    }
+    tracker = get_cost_tracker()
+    per_entity_cost = COST_PER_ENTITY["llc_pierce"]
+
     try:
         batch_num = 0
         while True:
+            if tracker.cap_hit:
+                stats["stopped_by_cost_cap"] = True
+                log.info("llc_piercer.cost_cap_hit",
+                         spent=tracker.total_spent, cap=tracker.cap_usd)
+                break
+
             batch_num += 1
             queue_rows = get_enrichment_batch(enrichment_type="llc_pierce", limit=batch_size)
             if not queue_rows:
@@ -507,6 +521,7 @@ async def run_batch(batch_size: int = 20):
                         update_entity(entity_id, {"enrichment_status": "in_progress"})
                     pierced = await pierce_entity(entity)
                     mark_enrichment_done(entity_id, "llc_pierce")
+                    tracker.add("llc_pierce", per_entity_cost)
                     if pierced:
                         stats["records_created"] += 1
                     else:
@@ -515,10 +530,22 @@ async def run_batch(batch_size: int = 20):
                     err = f"{type(e).__name__}: {e}"
                     log.error("llc_piercer.entity_error", entity=entity.get("name"), error=err)
                     mark_enrichment_failed(entity_id, "llc_pierce", err)
+
+                if tracker.cap_hit:
+                    stats["stopped_by_cost_cap"] = True
+                    log.info("llc_piercer.cost_cap_hit_mid_batch",
+                             spent=tracker.total_spent, cap=tracker.cap_usd)
+                    break
+
                 await asyncio.sleep(1)
 
+            if tracker.cap_hit:
+                break
+
+        stats["cost_estimated_usd"] = round(tracker.stage_spent("llc_pierce"), 2)
         finish_ingestion_log(log_id, stats)
         log.info("llc_piercer.batch_complete", **stats, batches=batch_num)
     except Exception as e:
+        stats["cost_estimated_usd"] = round(tracker.stage_spent("llc_pierce"), 2)
         finish_ingestion_log(log_id, stats, status="failed", error=str(e))
         raise

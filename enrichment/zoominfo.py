@@ -347,20 +347,31 @@ async def search_contacts_at_company(full_name: str, company: str) -> list:
 
 async def run_batch(batch_size: int = None):
     """
-    Drain the zoominfo enrichment queue.
-
-    Pulls batches of `batch_size` from allowed_enrichment_queue (the
-    SQL-level zip/borough-filtered view) and processes them in a loop
-    until the queue is empty for currently-enabled zips/boroughs. The
-    orchestrator's per-stage timeout caps total runtime.
+    Drain the zoominfo enrichment queue, respecting the per-run cost cap.
     """
+    from pipeline.orchestrator import get_cost_tracker, COST_PER_ENTITY
+
     batch_size = batch_size or config.ENRICHMENT_BATCH_SIZE
     log_id = start_ingestion_log("zoominfo_enrichment")
-    stats = {"records_fetched": 0, "records_created": 0, "records_skipped": 0}
+    stats = {
+        "records_fetched": 0,
+        "records_created": 0,
+        "records_skipped": 0,
+        "cost_estimated_usd": 0.0,
+        "stopped_by_cost_cap": False,
+    }
+    tracker = get_cost_tracker()
+    per_entity_cost = COST_PER_ENTITY["zoominfo_enrich"]
 
     try:
         batch_num = 0
         while True:
+            if tracker.cap_hit:
+                stats["stopped_by_cost_cap"] = True
+                log.info("zoominfo.cost_cap_hit",
+                         spent=tracker.total_spent, cap=tracker.cap_usd)
+                break
+
             batch_num += 1
             queue_rows = get_enrichment_batch(enrichment_type="zoominfo", limit=batch_size)
             if not queue_rows:
@@ -381,6 +392,7 @@ async def run_batch(batch_size: int = None):
                         update_entity(entity_id, {"enrichment_status": "in_progress"})
                     success = await enrich_entity_with_zoominfo(entity_id, entity_name)
                     mark_enrichment_done(entity_id, "zoominfo")
+                    tracker.add("zoominfo_enrich", per_entity_cost)
                     if success:
                         stats["records_created"] += 1
                     else:
@@ -390,13 +402,24 @@ async def run_batch(batch_size: int = None):
                     log.error("zoominfo.entity_error", entity=entity_name, error=err)
                     mark_enrichment_failed(entity_id, "zoominfo", err)
 
+                if tracker.cap_hit:
+                    stats["stopped_by_cost_cap"] = True
+                    log.info("zoominfo.cost_cap_hit_mid_batch",
+                             spent=tracker.total_spent, cap=tracker.cap_usd)
+                    break
+
                 # Zoominfo rate limit: be conservative
                 await asyncio.sleep(1.5)
 
+            if tracker.cap_hit:
+                break
+
+        stats["cost_estimated_usd"] = round(tracker.stage_spent("zoominfo_enrich"), 2)
         finish_ingestion_log(log_id, stats)
         log.info("zoominfo.batch_complete", **stats, batches=batch_num)
 
     except Exception as e:
+        stats["cost_estimated_usd"] = round(tracker.stage_spent("zoominfo_enrich"), 2)
         finish_ingestion_log(log_id, stats, status="failed", error=str(e))
         log.error("zoominfo.batch_error", error=str(e))
         raise
