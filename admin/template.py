@@ -118,6 +118,8 @@ ADMIN_HTML = """<!DOCTYPE html>
   .status-failed  { color: #dc2626; font-weight: 600; }
   .status-running, .status-in_progress { color: #6b7280; font-weight: 600; }
   .error-cell { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626; font-size: 12px; }
+  .error-cell a { color: inherit; text-decoration: underline dotted; cursor: pointer; }
+  .error-cell a:hover { color: #991b1b; text-decoration: underline; }
   .loading { color: #6b7280; font-style: italic; padding: 12px 0; }
   #zip-search {
     width: 100%;
@@ -371,7 +373,7 @@ async function loadRuns() {
         <td>${row.records_updated ?? '—'}</td>
         <td>${row.records_skipped ?? '—'}</td>
         <td>${cost}</td>
-        <td class="error-cell" title="${errFull.replace(/"/g, '&quot;')}">${err}</td>`;
+        <td class="error-cell" title="${errFull.replace(/"/g, '&quot;')}">${err ? `<a href="/admin/api/runs" target="_blank" rel="noopener">${err}</a>` : ''}</td>`;
       tbody.appendChild(tr);
     });
     document.getElementById('runs-loading').style.display = 'none';
