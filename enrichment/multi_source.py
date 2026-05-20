@@ -173,15 +173,24 @@ async def enrich_via_ai_web_search(
 # Source 2: Whitepages Pro
 # Works for: individuals with US phone numbers
 # Best for: small residential landlords, individual owners
-# Docs: https://pro.whitepages.com/developer/documentation/
+# Docs: https://api.whitepages.com/docs/documentation/getting-started
+#
+# Migrated from the legacy proapi.whitepages.com/3.0/person endpoint
+# (NXDOMAIN as of 2026) to api.whitepages.com/v2/person. Auth moved from
+# api_key query param to X-Api-Key header. Response shape simplified:
+# the v2 endpoint returns a bare JSON array, not {"results": [...]}, and
+# phones use {number, type} instead of {line_type_name, phone_number}.
 # ============================================================
 
 @retry_external(max_attempts=3)
-async def _fetch_whitepages(client: httpx.AsyncClient, full_name: str, city: str, state: str, api_key: str) -> httpx.Response:
-    """Inner HTTP helper for Whitepages Pro person lookup — retried on transient errors."""
+async def _fetch_whitepages(
+    client: httpx.AsyncClient, full_name: str, city: str, state: str, api_key: str,
+) -> httpx.Response:
+    """Inner HTTP helper for Whitepages v2 person lookup — retried on transient errors."""
     resp = await client.get(
-        "https://proapi.whitepages.com/3.0/person",
-        params={"name": full_name, "city": city, "state_code": state, "api_key": api_key},
+        "https://api.whitepages.com/v2/person",
+        params={"name": full_name, "city": city, "state_code": state},
+        headers={"X-Api-Key": api_key},
         timeout=30.0,
     )
     resp.raise_for_status()
@@ -196,8 +205,8 @@ async def enrich_via_whitepages(
     state: str = "NY",
 ) -> bool:
     """
-    Look up an individual's phone number via Whitepages Pro.
-    Add WHITEPAGES_API_KEY to .env when you have it.
+    Look up an individual via Whitepages v2 person endpoint and upsert phone/email.
+    WHITEPAGES_API_KEY must be set on the worker service.
     """
     api_key = config.__dict__.get("WHITEPAGES_API_KEY") or \
                __import__("os").getenv("WHITEPAGES_API_KEY", "")
@@ -207,30 +216,49 @@ async def enrich_via_whitepages(
     async with httpx.AsyncClient() as client:
         try:
             resp = await _fetch_whitepages(client, full_name, city, state, api_key)
-            data = resp.json()
-
-            people = data.get("results", [])
+            # v2 returns a bare JSON array. A 404 means "no match found" — the
+            # docs note this is normal; treat it as no-result rather than error.
+            people = resp.json() or []
             if not people:
                 return False
 
             person = people[0]
-            phones = person.get("phones", [])
-            emails = person.get("emails", [])
+            phones = person.get("phones") or []
+            emails = person.get("emails") or []
 
-            phone = phones[0].get("line_type_name", "") + " " + phones[0].get("phone_number", "") if phones else None
-            email = emails[0].get("email_address") if emails else None
+            phone = None
+            if phones:
+                p0 = phones[0]
+                num = p0.get("number") or ""
+                ptype = p0.get("type") or ""
+                phone = f"{ptype} {num}".strip() if ptype else num
+            email = None
+            if emails:
+                e0 = emails[0]
+                email = e0.get("email") or e0.get("email_address")
 
-            if phone or email:
-                upsert_contact(entity_id, {
-                    "full_name": full_name,
-                    "phone": phone,
-                    "email": email,
-                    "source": "whitepages",
-                    "confidence": 0.80,
-                })
-                log.info("multi_source.whitepages_found", entity=full_name)
-                return True
+            if not (phone or email):
+                return False
 
+            upsert_contact(entity_id, {
+                "full_name": person.get("name") or full_name,
+                "phone": phone,
+                "email": email,
+                "source": "whitepages",
+                "confidence": 0.80,
+                "raw_data": person,
+            })
+            log.info("multi_source.whitepages_found", entity=full_name,
+                     has_phone=bool(phone), has_email=bool(email))
+            return True
+
+        except httpx.HTTPStatusError as e:
+            # 404 = no records matched the query — normal, not an error.
+            if e.response.status_code == 404:
+                return False
+            log.warning("multi_source.whitepages_http_error",
+                        entity=full_name, status=e.response.status_code,
+                        body=e.response.text[:200])
         except Exception as e:
             log.warning("multi_source.whitepages_error", entity=full_name, error=str(e))
 
