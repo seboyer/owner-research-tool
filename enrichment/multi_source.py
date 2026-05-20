@@ -136,6 +136,11 @@ async def enrich_via_ai_web_search(
         result = json.loads(json_match.group())
         contacts = result.get("contacts", [])
 
+        # Track ACTUAL writes — not just "AI returned a JSON list". Previously
+        # we returned bool(contacts) which counted entries with no email/phone
+        # as a success, inflating records_created on the dashboard while no
+        # contact actually landed in the contacts table.
+        written = 0
         for contact in contacts:
             if not (contact.get("email") or contact.get("phone")):
                 continue
@@ -153,10 +158,11 @@ async def enrich_via_ai_web_search(
                 "confidence": contact.get("confidence", 0.6),
                 "raw_data": {"source_url": contact.get("source_url"), "notes": result.get("notes")},
             })
+            written += 1
 
-        if contacts:
-            log.info("multi_source.ai_found", entity=entity_name, count=len(contacts))
-        return bool(contacts)
+        if written:
+            log.info("multi_source.ai_found", entity=entity_name, count=written)
+        return written > 0
 
     except Exception as e:
         log.warning("multi_source.ai_error", entity=entity_name, error=str(e))
@@ -647,6 +653,7 @@ async def run_batch(batch_size: int = 100):
         "records_fetched": 0,
         "records_created": 0,
         "records_skipped": 0,
+        "records_no_match": 0,
         "cost_estimated_usd": 0.0,
         "stopped_by_cost_cap": False,
     }
@@ -684,7 +691,10 @@ async def run_batch(batch_size: int = 100):
                     if found:
                         stats["records_created"] += 1
                     else:
-                        stats["records_skipped"] += 1
+                        # Sources ran, no new contact written. Distinct from
+                        # records_skipped which is reserved for entities we
+                        # didn't process (allowlist/cap filtering).
+                        stats["records_no_match"] += 1
                 except Exception as e:
                     err = f"{type(e).__name__}: {e}"
                     log.error("multi_source.entity_error", entity=entity.get("name"), error=err)

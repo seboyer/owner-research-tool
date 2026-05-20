@@ -92,11 +92,29 @@ def parse_bbl(bbl: str) -> tuple[str, str, str] | None:
     return boro, block, lot
 
 
+_LAWYER_RE = re.compile(
+    r"\b(esq\.?|attorney|atty\.?|law\s+(office|offices|firm|group))\b",
+    re.IGNORECASE,
+)
+
+
+def is_lawyer_name(name: str) -> bool:
+    """Heuristic: is this name an attorney rather than the real owner?
+    ACRIS deed parties often list the buyer's attorney alongside the buyer
+    (e.g. 'CRAIG D. ZIM, ESQ.'). We never want to enrich a lawyer because
+    they're not the landlord — they handled the closing.
+    """
+    if not name:
+        return False
+    return bool(_LAWYER_RE.search(name))
+
+
 def _determine_enrichment_types(name: str, entity_type: str, extra: dict | None = None) -> list[str]:
     """Return the enrichment_types applicable to this entity at creation time.
     Empty list means no enrichment is needed (entity_status becomes 'done').
 
     Rules:
+      - Lawyer-looking names (Esq, Attorney, Law Firm, ...) → no enrichment
       - LLC-shaped names that look building-specific → 'llc_pierce'
       - LLC / corporation / management_company with portfolio_size >= 3 → 'zoominfo'
       - individual / unknown / NULL entity_type → 'multi_source'
@@ -104,6 +122,9 @@ def _determine_enrichment_types(name: str, entity_type: str, extra: dict | None 
     Multiple types can apply to one entity (e.g. an LLC with 5 buildings gets
     both 'llc_pierce' and 'zoominfo').
     """
+    if is_lawyer_name(name):
+        return []
+
     types: list[str] = []
     extra = extra or {}
     portfolio_size = extra.get("portfolio_size", 0) or 0
