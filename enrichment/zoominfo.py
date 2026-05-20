@@ -390,6 +390,8 @@ async def run_batch(batch_size: int = None):
             # Zoominfo rate limit: be conservative
             await asyncio.sleep(1.5)
 
+        # Roll zip/borough-gated entities into the dashboard's skipped count.
+        stats["records_skipped"] += skipped_by_zip
         finish_ingestion_log(log_id, stats)
         log.info("zoominfo.batch_complete", **stats, skipped_by_zip=skipped_by_zip)
 

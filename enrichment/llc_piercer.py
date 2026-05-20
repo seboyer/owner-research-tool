@@ -510,6 +510,10 @@ async def run_batch(batch_size: int = 20):
                 log.error("llc_piercer.entity_error", entity=entity.get("name"), error=err)
                 mark_enrichment_failed(entity_id, "llc_pierce", err)
             await asyncio.sleep(1)
+        # Roll zip/borough-gated entities into the dashboard's skipped count
+        # so "fetched=15 / created=0 / skipped=0" doesn't read as a no-op
+        # when the allowlist correctly filtered everything.
+        stats["records_skipped"] += skipped_by_zip
         finish_ingestion_log(log_id, stats)
         log.info("llc_piercer.batch_complete", **stats, skipped_by_zip=skipped_by_zip)
     except Exception as e:
