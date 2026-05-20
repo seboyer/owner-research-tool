@@ -28,7 +28,6 @@ import httpx
 import structlog
 from anthropic import Anthropic
 
-from admin.allowlist import is_entity_allowed_by_zip
 from config import config
 from database.client import (
     db, upsert_contact, update_entity,
@@ -579,7 +578,11 @@ async def enrich_entity(entity: dict) -> bool:
 
     found_any = False
 
-    # Check if we already have good contacts
+    # Check if we already have good contacts — short-circuit to avoid paying
+    # for re-enrichment of entities we already have data for. Returning False
+    # here makes the run accounting honest (records_created counts only
+    # entities where NEW contacts were written; this entity goes to
+    # records_skipped instead).
     existing = db().table("contacts")\
         .select("id")\
         .eq("entity_id", entity_id)\
@@ -589,7 +592,7 @@ async def enrich_entity(entity: dict) -> bool:
 
     if existing.data:
         log.info("multi_source.already_has_contacts", entity=entity_name)
-        return True
+        return False
 
     # Management companies + larger firms → Google Places first
     if entity_type in ("management_company", "corporation") or \
@@ -632,47 +635,51 @@ async def enrich_entity(entity: dict) -> bool:
 
 async def run_batch(batch_size: int = 100):
     """
-    Enrich a batch of entities from the enrichment queue (multi_source type).
+    Drain the multi_source enrichment queue.
+
+    Pulls batches of `batch_size` from allowed_enrichment_queue (the
+    SQL-level zip/borough-filtered view) and processes them in a loop
+    until the queue is empty for currently-enabled zips/boroughs. The
+    orchestrator's per-stage timeout caps total runtime — see
+    pipeline/orchestrator.STAGE_TIMEOUTS.
     """
     log_id = start_ingestion_log("multi_source_enrichment")
     stats = {"records_fetched": 0, "records_created": 0, "records_skipped": 0}
-    skipped_by_zip = 0
 
     try:
-        queue_rows = get_enrichment_batch(enrichment_type="multi_source", limit=batch_size)
-        stats["records_fetched"] = len(queue_rows)
-        log.info("multi_source.batch_start", count=len(queue_rows))
+        batch_num = 0
+        while True:
+            batch_num += 1
+            queue_rows = get_enrichment_batch(enrichment_type="multi_source", limit=batch_size)
+            if not queue_rows:
+                break
+            stats["records_fetched"] += len(queue_rows)
+            log.info("multi_source.batch_iter", batch=batch_num, count=len(queue_rows))
 
-        for row in queue_rows:
-            entity = row.get("entities") or {}
-            if not entity or not entity.get("id"):
-                continue
-            entity_id = entity["id"]
-            if not is_entity_allowed_by_zip(entity_id):
-                skipped_by_zip += 1
-                log.debug("multi_source.skipped_by_zip", entity=entity.get("name"), entity_id=entity_id)
-                continue
-            try:
-                # First job to pick up this entity flips 'pending' -> 'in_progress'.
-                if entity.get("enrichment_status") == "pending":
-                    update_entity(entity_id, {"enrichment_status": "in_progress"})
-                found = await enrich_entity(entity)
-                mark_enrichment_done(entity_id, "multi_source")
-                if found:
-                    stats["records_created"] += 1
-                else:
-                    stats["records_skipped"] += 1
-            except Exception as e:
-                err = f"{type(e).__name__}: {e}"
-                log.error("multi_source.entity_error", entity=entity.get("name"), error=err)
-                mark_enrichment_failed(entity_id, "multi_source", err)
+            for row in queue_rows:
+                entity = row.get("entities") or {}
+                if not entity or not entity.get("id"):
+                    continue
+                entity_id = entity["id"]
+                try:
+                    # First job to pick up this entity flips 'pending' -> 'in_progress'.
+                    if entity.get("enrichment_status") == "pending":
+                        update_entity(entity_id, {"enrichment_status": "in_progress"})
+                    found = await enrich_entity(entity)
+                    mark_enrichment_done(entity_id, "multi_source")
+                    if found:
+                        stats["records_created"] += 1
+                    else:
+                        stats["records_skipped"] += 1
+                except Exception as e:
+                    err = f"{type(e).__name__}: {e}"
+                    log.error("multi_source.entity_error", entity=entity.get("name"), error=err)
+                    mark_enrichment_failed(entity_id, "multi_source", err)
 
-            await asyncio.sleep(1)
+                await asyncio.sleep(1)
 
-        # Roll zip/borough-gated entities into the dashboard's skipped count.
-        stats["records_skipped"] += skipped_by_zip
         finish_ingestion_log(log_id, stats)
-        log.info("multi_source.batch_complete", **stats, skipped_by_zip=skipped_by_zip)
+        log.info("multi_source.batch_complete", **stats, batches=batch_num)
 
     except Exception as e:
         finish_ingestion_log(log_id, stats, status="failed", error=str(e))

@@ -334,18 +334,35 @@ def queue_for_enrichment(entity_id: str, enrichment_type: str, priority: int = 5
 def get_enrichment_batch(enrichment_type: str, limit: int = 50) -> list[dict]:
     """Fetch next batch of pending work for a given enrichment_type.
 
-    Joins the queue row with the full entity so callers don't need a second query.
-    Filters out items that have already exhausted retries (attempts >= 3).
+    Queries the allowed_enrichment_queue view (see migration 010), which
+    pre-filters by zipcode_allowlist + borough_allowlist at the SQL level.
+    Without this, batches were ~98% wasted re-skipping entities whose zips
+    were disabled — and worse, skipped entities never left the queue, so
+    every subsequent batch pulled and re-skipped the same set.
+
+    Returns rows shaped like {..., 'entities': {<entity fields>}} for
+    back-compat with the prior embedded-select format.
     """
-    res = db().table("enrichment_queue")\
-        .select("*, entities(*)")\
+    queue_res = db().table("allowed_enrichment_queue")\
+        .select("*")\
         .eq("enrichment_type", enrichment_type)\
         .lt("attempts", 3)\
         .order("priority", desc=False)\
         .order("created_at", desc=False)\
         .limit(limit)\
         .execute()
-    return res.data or []
+    queue_rows = queue_res.data or []
+    if not queue_rows:
+        return []
+
+    entity_ids = [r["entity_id"] for r in queue_rows]
+    entities_res = db().table("entities").select("*").in_("id", entity_ids).execute()
+    entities_by_id = {e["id"]: e for e in (entities_res.data or [])}
+
+    for r in queue_rows:
+        r["entities"] = entities_by_id.get(r["entity_id"])
+    # Drop any rows whose entity disappeared between the two queries (rare).
+    return [r for r in queue_rows if r.get("entities")]
 
 
 @supabase_retry()

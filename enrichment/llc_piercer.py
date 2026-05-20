@@ -21,7 +21,6 @@ from typing import Any
 import structlog
 from anthropic import Anthropic
 
-from admin.allowlist import is_entity_allowed_by_zip
 from config import config
 from database.client import (
     db, parse_bbl, upsert_entity, upsert_contact, upsert_relationship,
@@ -478,44 +477,48 @@ async def pierce_entity(entity: dict) -> bool:
 
 async def run_batch(batch_size: int = 20):
     """
-    Process a batch of building LLCs from the enrichment queue.
+    Drain the llc_pierce enrichment queue.
+
+    Pulls batches of `batch_size` from allowed_enrichment_queue (the
+    SQL-level zip/borough-filtered view) and processes them in a loop
+    until the queue is empty for currently-enabled zips/boroughs. The
+    orchestrator's per-stage timeout caps total runtime.
     """
     log_id = start_ingestion_log("llc_piercing")
     stats = {"records_fetched": 0, "records_created": 0, "records_skipped": 0}
-    skipped_by_zip = 0
     try:
-        queue_rows = get_enrichment_batch(enrichment_type="llc_pierce", limit=batch_size)
-        stats["records_fetched"] = len(queue_rows)
-        for row in queue_rows:
-            entity = row.get("entities") or {}
-            if not entity or not entity.get("id"):
-                continue
-            entity_id = entity["id"]
-            if not is_entity_allowed_by_zip(entity_id):
-                skipped_by_zip += 1
-                log.debug("llc_piercer.skipped_by_zip", entity=entity.get("name"), entity_id=entity_id)
-                continue
-            try:
-                # First job to pick up this entity flips 'pending' -> 'in_progress'.
-                if entity.get("enrichment_status") == "pending":
-                    update_entity(entity_id, {"enrichment_status": "in_progress"})
-                pierced = await pierce_entity(entity)
-                mark_enrichment_done(entity_id, "llc_pierce")
-                if pierced:
-                    stats["records_created"] += 1
-                else:
-                    stats["records_skipped"] += 1
-            except Exception as e:
-                err = f"{type(e).__name__}: {e}"
-                log.error("llc_piercer.entity_error", entity=entity.get("name"), error=err)
-                mark_enrichment_failed(entity_id, "llc_pierce", err)
-            await asyncio.sleep(1)
-        # Roll zip/borough-gated entities into the dashboard's skipped count
-        # so "fetched=15 / created=0 / skipped=0" doesn't read as a no-op
-        # when the allowlist correctly filtered everything.
-        stats["records_skipped"] += skipped_by_zip
+        batch_num = 0
+        while True:
+            batch_num += 1
+            queue_rows = get_enrichment_batch(enrichment_type="llc_pierce", limit=batch_size)
+            if not queue_rows:
+                break
+            stats["records_fetched"] += len(queue_rows)
+            log.info("llc_piercer.batch_iter", batch=batch_num, count=len(queue_rows))
+
+            for row in queue_rows:
+                entity = row.get("entities") or {}
+                if not entity or not entity.get("id"):
+                    continue
+                entity_id = entity["id"]
+                try:
+                    # First job to pick up this entity flips 'pending' -> 'in_progress'.
+                    if entity.get("enrichment_status") == "pending":
+                        update_entity(entity_id, {"enrichment_status": "in_progress"})
+                    pierced = await pierce_entity(entity)
+                    mark_enrichment_done(entity_id, "llc_pierce")
+                    if pierced:
+                        stats["records_created"] += 1
+                    else:
+                        stats["records_skipped"] += 1
+                except Exception as e:
+                    err = f"{type(e).__name__}: {e}"
+                    log.error("llc_piercer.entity_error", entity=entity.get("name"), error=err)
+                    mark_enrichment_failed(entity_id, "llc_pierce", err)
+                await asyncio.sleep(1)
+
         finish_ingestion_log(log_id, stats)
-        log.info("llc_piercer.batch_complete", **stats, skipped_by_zip=skipped_by_zip)
+        log.info("llc_piercer.batch_complete", **stats, batches=batch_num)
     except Exception as e:
         finish_ingestion_log(log_id, stats, status="failed", error=str(e))
         raise

@@ -28,7 +28,6 @@ import httpx
 import jwt  # PyJWT
 import structlog
 
-from admin.allowlist import is_entity_allowed_by_zip
 from config import config
 from database.client import (
     db, upsert_contact, update_entity,
@@ -348,52 +347,54 @@ async def search_contacts_at_company(full_name: str, company: str) -> list:
 
 async def run_batch(batch_size: int = None):
     """
-    Enrich a batch of entities using Zoominfo, pulling from the enrichment queue.
+    Drain the zoominfo enrichment queue.
+
+    Pulls batches of `batch_size` from allowed_enrichment_queue (the
+    SQL-level zip/borough-filtered view) and processes them in a loop
+    until the queue is empty for currently-enabled zips/boroughs. The
+    orchestrator's per-stage timeout caps total runtime.
     """
     batch_size = batch_size or config.ENRICHMENT_BATCH_SIZE
     log_id = start_ingestion_log("zoominfo_enrichment")
     stats = {"records_fetched": 0, "records_created": 0, "records_skipped": 0}
-    skipped_by_zip = 0
 
     try:
-        queue_rows = get_enrichment_batch(enrichment_type="zoominfo", limit=batch_size)
-        stats["records_fetched"] = len(queue_rows)
-        log.info("zoominfo.batch_start", count=len(queue_rows))
+        batch_num = 0
+        while True:
+            batch_num += 1
+            queue_rows = get_enrichment_batch(enrichment_type="zoominfo", limit=batch_size)
+            if not queue_rows:
+                break
+            stats["records_fetched"] += len(queue_rows)
+            log.info("zoominfo.batch_iter", batch=batch_num, count=len(queue_rows))
 
-        for row in queue_rows:
-            entity = row.get("entities") or {}
-            if not entity or not entity.get("id"):
-                continue
-            entity_id = entity["id"]
-            entity_name = entity["name"]
+            for row in queue_rows:
+                entity = row.get("entities") or {}
+                if not entity or not entity.get("id"):
+                    continue
+                entity_id = entity["id"]
+                entity_name = entity["name"]
 
-            if not is_entity_allowed_by_zip(entity_id):
-                skipped_by_zip += 1
-                log.debug("zoominfo.skipped_by_zip", entity=entity_name, entity_id=entity_id)
-                continue
+                try:
+                    # First job to pick up this entity flips 'pending' -> 'in_progress'.
+                    if entity.get("enrichment_status") == "pending":
+                        update_entity(entity_id, {"enrichment_status": "in_progress"})
+                    success = await enrich_entity_with_zoominfo(entity_id, entity_name)
+                    mark_enrichment_done(entity_id, "zoominfo")
+                    if success:
+                        stats["records_created"] += 1
+                    else:
+                        stats["records_skipped"] += 1
+                except Exception as e:
+                    err = f"{type(e).__name__}: {e}"
+                    log.error("zoominfo.entity_error", entity=entity_name, error=err)
+                    mark_enrichment_failed(entity_id, "zoominfo", err)
 
-            try:
-                # First job to pick up this entity flips 'pending' -> 'in_progress'.
-                if entity.get("enrichment_status") == "pending":
-                    update_entity(entity_id, {"enrichment_status": "in_progress"})
-                success = await enrich_entity_with_zoominfo(entity_id, entity_name)
-                mark_enrichment_done(entity_id, "zoominfo")
-                if success:
-                    stats["records_created"] += 1
-                else:
-                    stats["records_skipped"] += 1
-            except Exception as e:
-                err = f"{type(e).__name__}: {e}"
-                log.error("zoominfo.entity_error", entity=entity_name, error=err)
-                mark_enrichment_failed(entity_id, "zoominfo", err)
+                # Zoominfo rate limit: be conservative
+                await asyncio.sleep(1.5)
 
-            # Zoominfo rate limit: be conservative
-            await asyncio.sleep(1.5)
-
-        # Roll zip/borough-gated entities into the dashboard's skipped count.
-        stats["records_skipped"] += skipped_by_zip
         finish_ingestion_log(log_id, stats)
-        log.info("zoominfo.batch_complete", **stats, skipped_by_zip=skipped_by_zip)
+        log.info("zoominfo.batch_complete", **stats, batches=batch_num)
 
     except Exception as e:
         finish_ingestion_log(log_id, stats, status="failed", error=str(e))
