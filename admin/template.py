@@ -200,6 +200,7 @@ ADMIN_HTML = """<!DOCTYPE html>
           <th>Created</th>
           <th>Updated</th>
           <th>Skipped</th>
+          <th title="Processed end-to-end but no contact/owner found">No match</th>
           <th>Est. cost</th>
           <th>Error</th>
         </tr>
@@ -372,6 +373,7 @@ async function loadRuns() {
         <td>${row.records_created ?? '—'}</td>
         <td>${row.records_updated ?? '—'}</td>
         <td>${row.records_skipped ?? '—'}</td>
+        <td>${row.records_no_match ?? '—'}</td>
         <td>${cost}</td>
         <td class="error-cell" title="${errFull.replace(/"/g, '&quot;')}">${err ? `<a href="/admin/api/runs" target="_blank" rel="noopener">${err}</a>` : ''}</td>`;
       tbody.appendChild(tr);

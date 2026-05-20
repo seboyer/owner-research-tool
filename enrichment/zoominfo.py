@@ -357,6 +357,7 @@ async def run_batch(batch_size: int = None):
         "records_fetched": 0,
         "records_created": 0,
         "records_skipped": 0,
+        "records_no_match": 0,
         "cost_estimated_usd": 0.0,
         "stopped_by_cost_cap": False,
     }
@@ -396,7 +397,7 @@ async def run_batch(batch_size: int = None):
                     if success:
                         stats["records_created"] += 1
                     else:
-                        stats["records_skipped"] += 1
+                        stats["records_no_match"] += 1
                 except Exception as e:
                     err = f"{type(e).__name__}: {e}"
                     log.error("zoominfo.entity_error", entity=entity_name, error=err)

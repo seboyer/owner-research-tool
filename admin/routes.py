@@ -97,7 +97,14 @@ async def api_status(_auth: None = Depends(_auth)) -> dict:
         )
         queue_counts[etype] = res.count or 0
 
-    sched = get_scheduler_status()
+    # Wrap in try/except so a missing scheduler_status table (migration 009
+    # not yet run) doesn't 500 the whole endpoint and break the dashboard.
+    try:
+        sched = get_scheduler_status()
+    except Exception as e:
+        log.warning("admin.api_status.scheduler_status_unavailable", error=str(e))
+        sched = None
+
     auto_search_enabled = False
     weekly_pipeline_day = None
     worker_last_seen_at = None
@@ -323,7 +330,8 @@ async def api_runs(_auth: None = Depends(_auth)) -> list[dict]:
         .table("ingestion_log")
         .select(
             "id, source, run_started_at, run_finished_at, "
-            "records_fetched, records_created, records_updated, records_skipped, "
+            "records_fetched, records_created, records_updated, "
+            "records_skipped, records_no_match, "
             "status, error_message, cost_estimated_usd, stopped_by_cost_cap"
         )
         .order("run_started_at", desc=True)
