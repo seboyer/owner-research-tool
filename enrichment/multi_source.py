@@ -635,20 +635,33 @@ async def enrich_entity(entity: dict) -> bool:
 
 async def run_batch(batch_size: int = 100):
     """
-    Drain the multi_source enrichment queue.
-
-    Pulls batches of `batch_size` from allowed_enrichment_queue (the
-    SQL-level zip/borough-filtered view) and processes them in a loop
-    until the queue is empty for currently-enabled zips/boroughs. The
-    orchestrator's per-stage timeout caps total runtime — see
-    pipeline/orchestrator.STAGE_TIMEOUTS.
+    Drain the multi_source enrichment queue, respecting the per-run
+    cost cap (config.DAILY_ENRICHMENT_COST_CAP_USD). When the cap is hit
+    the loop exits and unprocessed entities stay in the queue for the
+    next run.
     """
+    from pipeline.orchestrator import get_cost_tracker, COST_PER_ENTITY
+
     log_id = start_ingestion_log("multi_source_enrichment")
-    stats = {"records_fetched": 0, "records_created": 0, "records_skipped": 0}
+    stats = {
+        "records_fetched": 0,
+        "records_created": 0,
+        "records_skipped": 0,
+        "cost_estimated_usd": 0.0,
+        "stopped_by_cost_cap": False,
+    }
+    tracker = get_cost_tracker()
+    per_entity_cost = COST_PER_ENTITY["multi_source_enrich"]
 
     try:
         batch_num = 0
         while True:
+            if tracker.cap_hit:
+                stats["stopped_by_cost_cap"] = True
+                log.info("multi_source.cost_cap_hit",
+                         spent=tracker.total_spent, cap=tracker.cap_usd)
+                break
+
             batch_num += 1
             queue_rows = get_enrichment_batch(enrichment_type="multi_source", limit=batch_size)
             if not queue_rows:
@@ -667,6 +680,7 @@ async def run_batch(batch_size: int = 100):
                         update_entity(entity_id, {"enrichment_status": "in_progress"})
                     found = await enrich_entity(entity)
                     mark_enrichment_done(entity_id, "multi_source")
+                    tracker.add("multi_source_enrich", per_entity_cost)
                     if found:
                         stats["records_created"] += 1
                     else:
@@ -676,11 +690,22 @@ async def run_batch(batch_size: int = 100):
                     log.error("multi_source.entity_error", entity=entity.get("name"), error=err)
                     mark_enrichment_failed(entity_id, "multi_source", err)
 
+                if tracker.cap_hit:
+                    stats["stopped_by_cost_cap"] = True
+                    log.info("multi_source.cost_cap_hit_mid_batch",
+                             spent=tracker.total_spent, cap=tracker.cap_usd)
+                    break
+
                 await asyncio.sleep(1)
 
+            if tracker.cap_hit:
+                break
+
+        stats["cost_estimated_usd"] = round(tracker.stage_spent("multi_source_enrich"), 2)
         finish_ingestion_log(log_id, stats)
         log.info("multi_source.batch_complete", **stats, batches=batch_num)
 
     except Exception as e:
+        stats["cost_estimated_usd"] = round(tracker.stage_spent("multi_source_enrich"), 2)
         finish_ingestion_log(log_id, stats, status="failed", error=str(e))
         raise

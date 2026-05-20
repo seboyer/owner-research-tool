@@ -197,6 +197,7 @@ ADMIN_HTML = """<!DOCTYPE html>
           <th>Created</th>
           <th>Updated</th>
           <th>Skipped</th>
+          <th>Est. cost</th>
           <th>Error</th>
         </tr>
       </thead>
@@ -353,15 +354,22 @@ async function loadRuns() {
       const tr = document.createElement('tr');
       const err = (row.error_message || '').substring(0, 200);
       const errFull = row.error_message || '';
+      const cost = row.cost_estimated_usd != null
+        ? '$' + Number(row.cost_estimated_usd).toFixed(2)
+        : '—';
+      const capBadge = row.stopped_by_cost_cap
+        ? ' <span title="Stopped by per-run cost cap; unprocessed entities roll over to next run" style="color:#b45309;font-weight:600;">🛑 cap hit</span>'
+        : '';
       tr.innerHTML = `
         <td>${row.source || '—'}</td>
         <td>${fmtDate(row.run_started_at)}</td>
         <td>${fmtDuration(row.run_started_at, row.run_finished_at)}</td>
-        <td class="${statusClass(row.status)}">${row.status || '—'}</td>
+        <td class="${statusClass(row.status)}">${row.status || '—'}${capBadge}</td>
         <td>${row.records_fetched ?? '—'}</td>
         <td>${row.records_created ?? '—'}</td>
         <td>${row.records_updated ?? '—'}</td>
         <td>${row.records_skipped ?? '—'}</td>
+        <td>${cost}</td>
         <td class="error-cell" title="${errFull.replace(/"/g, '&quot;')}">${err}</td>`;
       tbody.appendChild(tr);
     });

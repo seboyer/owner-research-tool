@@ -117,6 +117,71 @@ async def _run_stage_with_timeout(stage_name: str, stage_fn: Callable) -> None:
 
 
 # ============================================================
+# Cost cap — shared across enrichment stages within a single run
+# ============================================================
+
+# Per-entity cost estimates by stage (configurable in config.py).
+# Stages call tracker.add(stage_name) after each processed entity; when the
+# tracker's total crosses DAILY_ENRICHMENT_COST_CAP_USD, the stage breaks
+# out of its drain loop and unprocessed entities roll over to the next run.
+COST_PER_ENTITY: dict[str, float] = {
+    "llc_pierce":          config.COST_PER_ENTITY_LLC_PIERCE,
+    "acris_pdf_pierce":    config.COST_PER_ENTITY_ACRIS_PDF,
+    "zoominfo_enrich":     config.COST_PER_ENTITY_ZOOMINFO,
+    "multi_source_enrich": config.COST_PER_ENTITY_MULTI_SOURCE,
+}
+
+
+class CostTracker:
+    """Tracks estimated enrichment spend within a single pipeline run.
+
+    Not thread-safe — the worker runs one pipeline at a time, gated by
+    scheduler._pipeline_lock.
+    """
+
+    def __init__(self, cap_usd: float = 0.0):
+        # cap_usd <= 0 means no cap (unlimited).
+        self.cap_usd = cap_usd
+        self.spent_by_stage: dict[str, float] = {}
+
+    @property
+    def total_spent(self) -> float:
+        return sum(self.spent_by_stage.values())
+
+    @property
+    def cap_hit(self) -> bool:
+        return self.cap_usd > 0 and self.total_spent >= self.cap_usd
+
+    def stage_spent(self, stage: str) -> float:
+        return self.spent_by_stage.get(stage, 0.0)
+
+    def add(self, stage: str, amount: float | None = None) -> None:
+        if amount is None:
+            amount = COST_PER_ENTITY.get(stage, 0.0)
+        self.spent_by_stage[stage] = self.spent_by_stage.get(stage, 0.0) + amount
+
+
+_tracker: CostTracker | None = None
+
+
+def get_cost_tracker() -> CostTracker:
+    """Return the current tracker, creating an uninitialized one if needed.
+    Stages call this; the orchestrator's pipeline entrypoints reset it."""
+    global _tracker
+    if _tracker is None:
+        _tracker = CostTracker(cap_usd=config.DAILY_ENRICHMENT_COST_CAP_USD)
+    return _tracker
+
+
+def reset_cost_tracker() -> CostTracker:
+    """Start a fresh tracker for a new top-level pipeline run."""
+    global _tracker
+    _tracker = CostTracker(cap_usd=config.DAILY_ENRICHMENT_COST_CAP_USD)
+    log.info("pipeline.cost_tracker_reset", cap_usd=_tracker.cap_usd)
+    return _tracker
+
+
+# ============================================================
 # Composite Pipelines
 # ============================================================
 
@@ -129,6 +194,7 @@ async def run_initial_full_load():
     Monitor progress in the ingestion_log table.
     """
     log.info("pipeline.full_load_start")
+    reset_cost_tracker()
     start = datetime.utcnow()
 
     stages = [
@@ -154,12 +220,18 @@ async def run_initial_full_load():
     log.info("pipeline.full_load_complete", elapsed_seconds=elapsed)
 
 
-async def run_daily_pipeline():
+async def run_daily_pipeline(reset_tracker: bool = True):
     """
     Daily pipeline — runs every day to catch new data and enrich.
     Lighter than the full load — only processes deltas.
+
+    reset_tracker defaults to True for standalone calls (Run Daily / cron).
+    run_weekly_pipeline passes False so the weekly's tracker carries
+    through the embedded daily run instead of restarting mid-pipeline.
     """
     log.info("pipeline.daily_start")
+    if reset_tracker:
+        reset_cost_tracker()
     start = datetime.utcnow()
 
     stages = [
@@ -187,6 +259,7 @@ async def run_weekly_pipeline():
     Refreshes HPD + WoW data, which change slowly.
     """
     log.info("pipeline.weekly_start")
+    reset_cost_tracker()
 
     stages = [
         ("hpd_full",      stage_hpd_full),
@@ -199,8 +272,9 @@ async def run_weekly_pipeline():
             log.error("pipeline.weekly_stage_failed",
                       stage=stage_name, error=str(e))
 
-    # Then run the daily pipeline on top (already wraps its own stages).
-    await run_daily_pipeline()
+    # Then run the daily pipeline on top. Pass reset_tracker=False so the
+    # weekly's tracker carries through (single per-run cap, not per-call).
+    await run_daily_pipeline(reset_tracker=False)
 
     log.info("pipeline.weekly_complete")
 
@@ -211,6 +285,7 @@ async def run_enrichment_only():
     but enrichment is behind (e.g., after adding a new API key).
     """
     log.info("pipeline.enrichment_only_start")
+    reset_cost_tracker()
     stages = [
         ("llc_piercing",       lambda: stage_llc_piercing(batch_size=25)),
         ("acris_pdf_pierce",   lambda: stage_acris_pdf_pierce(batch_size=20)),

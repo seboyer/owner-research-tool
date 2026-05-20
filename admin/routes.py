@@ -287,7 +287,7 @@ async def api_runs(_auth: None = Depends(_auth)) -> list[dict]:
         .select(
             "id, source, run_started_at, run_finished_at, "
             "records_fetched, records_created, records_updated, records_skipped, "
-            "status, error_message"
+            "status, error_message, cost_estimated_usd, stopped_by_cost_cap"
         )
         .order("run_started_at", desc=True)
         .limit(50)
