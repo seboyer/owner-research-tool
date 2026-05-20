@@ -101,6 +101,23 @@ class Config:
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
 
     # ------------------------------------------------------------------
+    # Enrichment cost cap (per pipeline run)
+    # Set DAILY_ENRICHMENT_COST_CAP_USD to a positive float to cap
+    # estimated spend per Run Daily / Run Weekly. When the cap is hit,
+    # remaining queue items roll over to the next run (they have older
+    # created_at, so the natural ordering serves them first). Default
+    # 0 = no cap.
+    #
+    # Per-entity estimates are conservative (overestimate rather than
+    # under). Tunable per-stage so you can calibrate from observed spend.
+    # ------------------------------------------------------------------
+    DAILY_ENRICHMENT_COST_CAP_USD: float = float(os.getenv("DAILY_ENRICHMENT_COST_CAP_USD", "0"))
+    COST_PER_ENTITY_LLC_PIERCE: float = float(os.getenv("COST_PER_ENTITY_LLC_PIERCE", "0.30"))
+    COST_PER_ENTITY_ACRIS_PDF: float = float(os.getenv("COST_PER_ENTITY_ACRIS_PDF", "0.30"))
+    COST_PER_ENTITY_ZOOMINFO: float = float(os.getenv("COST_PER_ENTITY_ZOOMINFO", "1.50"))
+    COST_PER_ENTITY_MULTI_SOURCE: float = float(os.getenv("COST_PER_ENTITY_MULTI_SOURCE", "1.00"))
+
+    # ------------------------------------------------------------------
     # Webhook + Airtable integration (manual address feed)
     # ------------------------------------------------------------------
     WEBHOOK_PORT: int = int(os.getenv("PORT", "8000"))  # Render injects PORT
