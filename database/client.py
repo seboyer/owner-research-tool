@@ -530,11 +530,39 @@ def get_active_triggers() -> dict[str, str]:
     return out
 
 
+# Anything in 'running' state past this threshold is presumed orphaned —
+# the longest legitimate weekly run (hpd_full 4h + wow 2h + daily ~5h) is
+# bounded under 12h by the stage timeouts in pipeline/orchestrator.py.
+_TRIGGER_ORPHAN_THRESHOLD_HOURS = 12
+
+
 @supabase_retry()
 def claim_next_pipeline_trigger() -> dict | None:
     """Atomically claim the oldest pending trigger by flipping it to 'running'.
     Returns the row, or None if nothing is pending. The conditional UPDATE
-    (eq status='pending') makes this safe against concurrent claimers."""
+    (eq status='pending') makes this safe against concurrent claimers.
+
+    Also closes any 'running' trigger older than _TRIGGER_ORPHAN_THRESHOLD_HOURS
+    as orphaned. Unlike ingestion_log, the trigger row's lifecycle is fully
+    owned by the worker — when a worker dies mid-pipeline, the trigger sits
+    in 'running' forever and the admin UI's Run Daily/Weekly button stays
+    disabled. This cleanup runs every 30s via the poll loop.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    orphan_cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(hours=_TRIGGER_ORPHAN_THRESHOLD_HOURS)
+    ).isoformat()
+    db().table("pipeline_triggers").update({
+        "status": "failed",
+        "finished_at": "now()",
+        "error_message": (
+            f"orphaned — running for >{_TRIGGER_ORPHAN_THRESHOLD_HOURS}h, "
+            "presumed dead worker"
+        ),
+    }).eq("status", "running").lt("started_at", orphan_cutoff).execute()
+
     sel = (
         db()
         .table("pipeline_triggers")
