@@ -237,10 +237,27 @@ async function loadStatus() {
     if (!r.ok) throw new Error(r.status);
     const d = await r.json();
     const enabled = d.auto_search_enabled;
+    const stale = d.worker_stale;
     const badge = document.getElementById('auto-badge');
-    badge.textContent = enabled ? 'AUTO ON' : 'AUTO OFF';
-    badge.className = 'badge ' + (enabled ? 'badge-green' : 'badge-red');
-    document.getElementById('auto-label').textContent = enabled ? 'enabled' : 'disabled';
+    const label = document.getElementById('auto-label');
+    if (stale) {
+      badge.textContent = 'WORKER OFFLINE';
+      badge.className = 'badge badge-gray';
+      label.textContent = 'worker offline';
+      label.title = d.worker_last_seen_at
+        ? 'last heartbeat: ' + new Date(d.worker_last_seen_at).toLocaleString()
+        : 'no heartbeat ever recorded';
+    } else if (enabled) {
+      badge.textContent = 'AUTO ON';
+      badge.className = 'badge badge-green';
+      label.textContent = 'enabled';
+      label.title = '';
+    } else {
+      badge.textContent = 'AUTO OFF';
+      badge.className = 'badge badge-red';
+      label.textContent = 'disabled';
+      label.title = '';
+    }
     const q = d.queue || {};
     document.getElementById('q-llc').textContent = q.llc_pierce ?? '—';
     document.getElementById('q-zoo').textContent  = q.zoominfo   ?? '—';

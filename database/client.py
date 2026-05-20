@@ -408,6 +408,30 @@ def mark_enrichment_failed(entity_id: str, enrichment_type: str, error: str):
 # Ingestion Log
 # ============================================================
 
+# ============================================================
+# Scheduler heartbeat (read by the admin UI to show worker state)
+# ============================================================
+
+@supabase_retry()
+def upsert_scheduler_status(auto_search_enabled: bool, weekly_pipeline_day: str | None = None) -> None:
+    db().table("scheduler_status").upsert({
+        "id": 1,
+        "auto_search_enabled": auto_search_enabled,
+        "weekly_pipeline_day": weekly_pipeline_day,
+        "last_seen_at": "now()",
+    }, on_conflict="id").execute()
+
+
+@supabase_retry()
+def get_scheduler_status() -> dict | None:
+    res = db().table("scheduler_status").select("*").eq("id", 1).limit(1).execute()
+    return res.data[0] if res.data else None
+
+
+# ============================================================
+# Ingestion log
+# ============================================================
+
 @supabase_retry()
 def start_ingestion_log(source: str) -> str:
     # Close any prior 'running' rows for this source as orphans before starting a
