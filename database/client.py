@@ -17,6 +17,7 @@ import structlog
 from supabase import create_client, Client
 
 from config import config
+from database.retry import supabase_retry
 
 log = structlog.get_logger(__name__)
 
@@ -153,6 +154,7 @@ def is_building_llc(name: str) -> bool:
 # Seen Records — dedup guard
 # ============================================================
 
+@supabase_retry()
 def already_seen(source: str, external_id: str, new_checksum: str = None) -> bool:
     """Return True if record has been seen and hasn't changed."""
     res = db().table("seen_records")\
@@ -173,6 +175,7 @@ def already_seen(source: str, external_id: str, new_checksum: str = None) -> boo
     return True
 
 
+@supabase_retry()
 def mark_seen(source: str, external_id: str, chk: str = None):
     db().table("seen_records").upsert({
         "source": source,
@@ -185,6 +188,7 @@ def mark_seen(source: str, external_id: str, chk: str = None):
 # Properties
 # ============================================================
 
+@supabase_retry()
 def upsert_property(bbl: str, data: dict) -> str:
     """Upsert a property by BBL. Returns the property UUID."""
     data["bbl"] = bbl
@@ -196,6 +200,7 @@ def upsert_property(bbl: str, data: dict) -> str:
 # Entities
 # ============================================================
 
+@supabase_retry()
 def find_entity_by_name(name: str) -> Optional[dict]:
     """Find an existing entity using normalized name (exact match after normalization)."""
     norm = normalize_name(name)
@@ -207,6 +212,7 @@ def find_entity_by_name(name: str) -> Optional[dict]:
     return res.data[0] if res.data else None
 
 
+@supabase_retry()
 def upsert_entity(name: str, entity_type: str, extra: dict = None) -> str:
     """
     Find or create an entity. Returns the UUID.
@@ -242,6 +248,7 @@ def upsert_entity(name: str, entity_type: str, extra: dict = None) -> str:
     return entity_id
 
 
+@supabase_retry()
 def update_entity(entity_id: str, data: dict):
     db().table("entities").update(data).eq("id", entity_id).execute()
 
@@ -250,6 +257,7 @@ def update_entity(entity_id: str, data: dict):
 # Entity Relationships
 # ============================================================
 
+@supabase_retry()
 def upsert_relationship(child_entity_id: str, parent_entity_id: str, rel_type: str,
                          source: str, confidence: float = 0.7, evidence: str = None):
     db().table("entity_relationships").upsert({
@@ -266,6 +274,7 @@ def upsert_relationship(child_entity_id: str, parent_entity_id: str, rel_type: s
 # Property Roles
 # ============================================================
 
+@supabase_retry()
 def upsert_property_role(property_id: str, entity_id: str, role: str, source: str, extra: dict = None):
     db().table("property_roles").upsert({
         "property_id": property_id,
@@ -281,6 +290,7 @@ def upsert_property_role(property_id: str, entity_id: str, role: str, source: st
 # Contacts
 # ============================================================
 
+@supabase_retry()
 def upsert_contact(entity_id: str, data: dict) -> str:
     """Upsert a contact. Deduplicates on (entity_id, email)."""
     data["entity_id"] = entity_id
@@ -310,6 +320,7 @@ def upsert_contact(entity_id: str, data: dict) -> str:
 # Enrichment Queue
 # ============================================================
 
+@supabase_retry()
 def queue_for_enrichment(entity_id: str, enrichment_type: str, priority: int = 5):
     """Add an (entity, enrichment_type) row to the queue. Idempotent."""
     db().table("enrichment_queue").upsert({
@@ -319,6 +330,7 @@ def queue_for_enrichment(entity_id: str, enrichment_type: str, priority: int = 5
     }, on_conflict="entity_id,enrichment_type").execute()
 
 
+@supabase_retry()
 def get_enrichment_batch(enrichment_type: str, limit: int = 50) -> list[dict]:
     """Fetch next batch of pending work for a given enrichment_type.
 
@@ -336,6 +348,7 @@ def get_enrichment_batch(enrichment_type: str, limit: int = 50) -> list[dict]:
     return res.data or []
 
 
+@supabase_retry()
 def mark_enrichment_done(entity_id: str, enrichment_type: str):
     """Remove this work item from the queue. If no items remain for the entity,
     promote enrichment_status to 'done'."""
@@ -353,6 +366,7 @@ def mark_enrichment_done(entity_id: str, enrichment_type: str):
         update_entity(entity_id, {"enrichment_status": "done"})
 
 
+@supabase_retry()
 def mark_enrichment_failed(entity_id: str, enrichment_type: str, error: str):
     """Increment attempts. After 3 attempts, drop the row and (if no other queue
     rows remain) set enrichment_status='failed' with the error appended to notes.
@@ -394,6 +408,7 @@ def mark_enrichment_failed(entity_id: str, enrichment_type: str, error: str):
 # Ingestion Log
 # ============================================================
 
+@supabase_retry()
 def start_ingestion_log(source: str) -> str:
     # Close any prior 'running' rows for this source as orphans before starting a
     # fresh run. Cron jobs run with max_instances=1 and manual triggers have their
@@ -409,6 +424,7 @@ def start_ingestion_log(source: str) -> str:
     return res.data[0]["id"]
 
 
+@supabase_retry()
 def finish_ingestion_log(log_id: str, stats: dict, status: str = "success", error: str = None):
     db().table("ingestion_log").update({
         "run_finished_at": "now()",
@@ -423,6 +439,7 @@ def finish_ingestion_log(log_id: str, stats: dict, status: str = "success", erro
 # Web service inserts; worker polls and runs. See migration 007.
 # ============================================================
 
+@supabase_retry()
 def request_pipeline_trigger(pipeline: str, requested_by: str = "admin_ui") -> dict:
     """Queue a pipeline run. Returns the new row."""
     res = db().table("pipeline_triggers").insert({
@@ -432,6 +449,7 @@ def request_pipeline_trigger(pipeline: str, requested_by: str = "admin_ui") -> d
     return res.data[0]
 
 
+@supabase_retry()
 def get_active_triggers() -> dict[str, str]:
     """Return {pipeline: status} where status is 'pending', 'running', or 'idle'.
     Used by the admin UI to render button state."""
@@ -450,6 +468,7 @@ def get_active_triggers() -> dict[str, str]:
     return out
 
 
+@supabase_retry()
 def claim_next_pipeline_trigger() -> dict | None:
     """Atomically claim the oldest pending trigger by flipping it to 'running'.
     Returns the row, or None if nothing is pending. The conditional UPDATE
@@ -481,6 +500,7 @@ def claim_next_pipeline_trigger() -> dict | None:
     return upd.data[0]
 
 
+@supabase_retry()
 def finish_pipeline_trigger(trigger_id: int, success: bool, error: str | None = None) -> None:
     db().table("pipeline_triggers").update({
         "status": "done" if success else "failed",
