@@ -311,6 +311,79 @@ async def enrich_via_apollo(
 
 
 # ============================================================
+# Source 3b: BatchData V3 Skip Trace
+# Works for: any property — returns up to 3 persons at the address.
+# Best for: individual landlords (the most reliable source per testing).
+# Cost: ~$0.40 per matched property.
+# Auth: Bearer token. Docs: https://app.batchdata.com/docs/api/v3
+# ============================================================
+
+async def enrich_via_batchdata(entity_id: str, entity_name: str) -> bool:
+    """
+    Skip-trace the property linked to this entity via BatchData V3 and write
+    the matched person's contact info. Reuses the existing
+    enrichment.contact.sources.batchdata.skip_trace_property helper.
+    """
+    if not config.BATCHDATA_API_KEY:
+        return False
+
+    # Find a property address for this entity.
+    roles_res = db().table("property_roles")\
+        .select("properties(house_number, street_name, zip_code, address)")\
+        .eq("entity_id", entity_id)\
+        .eq("is_current", True)\
+        .limit(1)\
+        .execute()
+    if not roles_res.data:
+        return False
+
+    prop = roles_res.data[0].get("properties") or {}
+    house = (prop.get("house_number") or "").strip()
+    street_name = (prop.get("street_name") or "").strip()
+    street = f"{house} {street_name}".strip() if (house or street_name) else (prop.get("address") or "").strip()
+    zip_code = (prop.get("zip_code") or "").strip()
+    if not street or not zip_code:
+        # BatchData needs at least street + zip (or street + city).
+        return False
+
+    try:
+        from enrichment.contact.sources.batchdata import skip_trace_property
+        hits = await skip_trace_property(
+            street=street,
+            city="New York",
+            state="NY",
+            zip_code=zip_code,
+        )
+    except Exception as e:
+        log.warning("multi_source.batchdata_error", entity=entity_name, error=str(e))
+        return False
+
+    if not hits:
+        return False
+
+    # Take the first returned person (treated as primary property owner by
+    # prong1_signer.py, same convention here). Match Whitepages/Apollo
+    # behavior: only upsert if we got a real email or phone.
+    hit = hits[0]
+    if not (hit.email or hit.phone):
+        return False
+
+    upsert_contact(entity_id, {
+        "first_name": hit.first_name,
+        "last_name": hit.last_name,
+        "full_name": hit.full_name or entity_name,
+        "email": hit.email,
+        "phone": hit.phone,
+        "source": "batchdata_skip_trace",
+        "confidence": hit.confidence,
+        "raw_data": hit.raw,
+    })
+    log.info("multi_source.batchdata_found", entity=entity_name,
+             matched=hit.full_name, has_email=bool(hit.email), has_phone=bool(hit.phone))
+    return True
+
+
+# ============================================================
 # Source 3: PropertyRadar
 # Works for: any property owner — has contact info tied to BBL
 # Best for: individual landlords who don't have a web presence
@@ -683,12 +756,16 @@ async def enrich_entity(entity: dict) -> bool:
     found_any |= await enrich_via_ai_web_search(entity_id, entity_name, entity_type, address)
     await asyncio.sleep(0.5)
 
-    # Individuals → Apollo + PropertyRadar + Whitepages + Proxycurl
+    # Individuals → BatchData + Apollo + PropertyRadar + Whitepages + Proxycurl
     if entity_type == "individual" or (
         entity_type == "unknown" and " " in entity_name and "LLC" not in entity_name.upper()
     ):
+        # BatchData V3 skip trace — highest-yield source per testing.
+        # ~$0.40 per matched property; goes first so the best source wins.
+        found_any |= await enrich_via_batchdata(entity_id, entity_name)
+        await asyncio.sleep(0.5)
+
         # Apollo.io — cheap (~$0.05) person match, high quality when it hits.
-        # Runs first so cheaper/better data wins before we burn paid lookups.
         found_any |= await enrich_via_apollo(entity_id, entity_name)
         await asyncio.sleep(0.5)
 
