@@ -238,6 +238,79 @@ async def enrich_via_whitepages(
 
 
 # ============================================================
+# Source 3a: Apollo.io
+# Works for: individuals (person match by name)
+# Best for: any individual landlord with a professional web presence
+# Cost: ~$0.05/match. Auth via X-Api-Key header (NOT in JSON body).
+# Docs: https://api-docs.apollo.io/reference/match-person
+# ============================================================
+
+@retry_external(max_attempts=3)
+async def _fetch_apollo_person(
+    client: httpx.AsyncClient, full_name: str, api_key: str, company: str | None = None,
+) -> httpx.Response:
+    """Inner HTTP helper for Apollo people/match — retried on transient errors."""
+    payload: dict = {"name": full_name}
+    if company:
+        payload["organization_name"] = company
+    resp = await client.post(
+        "https://api.apollo.io/v1/people/match",
+        json=payload,
+        headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    return resp
+
+
+async def enrich_via_apollo(
+    entity_id: str,
+    full_name: str,
+    company: str | None = None,
+) -> bool:
+    """
+    Look up a person's email + phone via Apollo.io /v1/people/match.
+    APOLLO_API_KEY must be set (on the worker service in production).
+    """
+    api_key = config.APOLLO_API_KEY
+    if not api_key:
+        return False
+
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await _fetch_apollo_person(client, full_name, api_key, company)
+            data = resp.json() or {}
+            person = data.get("person") or {}
+            if not person:
+                return False
+
+            email = person.get("email")
+            phones = person.get("phone_numbers") or []
+            phone = phones[0].get("sanitized_number") if phones else None
+
+            if not (email or phone):
+                return False
+
+            name_parts = (person.get("name") or full_name).rsplit(" ", 1)
+            upsert_contact(entity_id, {
+                "first_name": person.get("first_name") or (name_parts[0] if len(name_parts) > 1 else full_name),
+                "last_name": person.get("last_name") or (name_parts[1] if len(name_parts) > 1 else ""),
+                "full_name": person.get("name") or full_name,
+                "email": email,
+                "phone": phone,
+                "source": "apollo",
+                "confidence": 0.85,
+                "raw_data": person,
+            })
+            log.info("multi_source.apollo_found", entity=full_name,
+                     has_email=bool(email), has_phone=bool(phone))
+            return True
+        except Exception as e:
+            log.warning("multi_source.apollo_error", entity=full_name, error=str(e))
+            return False
+
+
+# ============================================================
 # Source 3: PropertyRadar
 # Works for: any property owner — has contact info tied to BBL
 # Best for: individual landlords who don't have a web presence
@@ -610,10 +683,15 @@ async def enrich_entity(entity: dict) -> bool:
     found_any |= await enrich_via_ai_web_search(entity_id, entity_name, entity_type, address)
     await asyncio.sleep(0.5)
 
-    # Individuals → PropertyRadar + Whitepages + Proxycurl
+    # Individuals → Apollo + PropertyRadar + Whitepages + Proxycurl
     if entity_type == "individual" or (
         entity_type == "unknown" and " " in entity_name and "LLC" not in entity_name.upper()
     ):
+        # Apollo.io — cheap (~$0.05) person match, high quality when it hits.
+        # Runs first so cheaper/better data wins before we burn paid lookups.
+        found_any |= await enrich_via_apollo(entity_id, entity_name)
+        await asyncio.sleep(0.5)
+
         # PropertyRadar — best for property owners
         bbl = None
         roles = db().table("property_roles")\
