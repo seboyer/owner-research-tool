@@ -104,23 +104,42 @@ class ZipToggleBody(BaseModel):
     enabled: bool
 
 
+def _fetch_all_property_zips() -> list[str]:
+    """Fetch every non-null zip_code from properties via pagination.
+
+    PostgREST defaults to a 1000-row response cap, so a single .execute()
+    silently truncated the result and only the first 1000 properties (all
+    Manhattan, in insertion order) contributed to the zipcode counts.
+    """
+    page_size = 1000
+    offset = 0
+    all_zips: list[str] = []
+    while True:
+        res = (
+            db()
+            .table("properties")
+            .select("zip_code")
+            .neq("zip_code", "")
+            .not_.is_("zip_code", "null")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        rows = res.data or []
+        for row in rows:
+            z = (row.get("zip_code") or "").strip()
+            if z:
+                all_zips.append(z)
+        if len(rows) < page_size:
+            break
+        offset += page_size
+    return all_zips
+
+
 @router.get("/api/zipcodes")
 async def api_zipcodes(_auth: None = Depends(_auth)) -> list[dict]:
     """Discover all zips in the properties table, upsert missing ones, return full list."""
-    # Step 1: discover zips in properties that aren't in the allowlist yet
-    props_res = (
-        db()
-        .table("properties")
-        .select("zip_code")
-        .neq("zip_code", "")
-        .not_.is_("zip_code", "null")
-        .execute()
-    )
-    known_zips: set[str] = set()
-    for row in (props_res.data or []):
-        z = (row.get("zip_code") or "").strip()
-        if z:
-            known_zips.add(z)
+    all_zips = _fetch_all_property_zips()
+    known_zips: set[str] = set(all_zips)
 
     # Upsert any new zips (disabled by default — must be opted in via admin)
     existing_res = db().table("zipcode_allowlist").select("zip_code").execute()
@@ -142,10 +161,8 @@ async def api_zipcodes(_auth: None = Depends(_auth)) -> list[dict]:
 
     # Count properties per zip
     zip_counts: dict[str, int] = {}
-    for row in (props_res.data or []):
-        z = (row.get("zip_code") or "").strip()
-        if z:
-            zip_counts[z] = zip_counts.get(z, 0) + 1
+    for z in all_zips:
+        zip_counts[z] = zip_counts.get(z, 0) + 1
 
     result = []
     for zip_code, entry in allowlist_map.items():
