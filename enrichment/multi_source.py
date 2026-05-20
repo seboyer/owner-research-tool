@@ -669,6 +669,8 @@ async def run_batch(batch_size: int = 100):
 
             await asyncio.sleep(1)
 
+        # Roll zip/borough-gated entities into the dashboard's skipped count.
+        stats["records_skipped"] += skipped_by_zip
         finish_ingestion_log(log_id, stats)
         log.info("multi_source.batch_complete", **stats, skipped_by_zip=skipped_by_zip)
 
