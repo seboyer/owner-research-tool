@@ -157,6 +157,7 @@ ADMIN_HTML = """<!DOCTYPE html>
       <thead>
         <tr>
           <th>Borough</th>
+          <th>Null-zip properties</th>
           <th>Enabled</th>
         </tr>
       </thead>
@@ -456,6 +457,7 @@ async function loadBoroughs() {
       const chkId = 'chk-boro-' + b.borough_code;
       tr.innerHTML = `
         <td>${b.borough_name}</td>
+        <td>${b.null_zip_property_count ?? 0}</td>
         <td>
           <label class="toggle">
             <input type="checkbox" id="${chkId}" ${b.enabled ? 'checked' : ''}
