@@ -77,7 +77,20 @@ async def _job_weekly():
 
 async def _job_poll_triggers():
     """Poll pipeline_triggers every 30s and run any pending request.
-    Skips if another pipeline is already running on this worker."""
+    Also acts as the worker's heartbeat — writes scheduler_status before
+    trying to acquire the pipeline lock, so the admin UI keeps seeing a
+    fresh last_seen_at even during long pipeline runs.
+    Skips claim attempts if another pipeline is already running on this worker."""
+    # Heartbeat — always fires, lock-independent.
+    try:
+        from database.client import upsert_scheduler_status
+        upsert_scheduler_status(
+            auto_search_enabled=config.AUTO_SEARCH_ENABLED,
+            weekly_pipeline_day=config.WEEKLY_PIPELINE_DAY,
+        )
+    except Exception as e:
+        log.warning("scheduler.heartbeat_failed", error=str(e))
+
     if not _pipeline_lock.acquire(blocking=False):
         return  # pipeline already busy; try again next tick
 
@@ -195,6 +208,17 @@ def register_jobs(scheduler) -> list[str]:
     )
     registered.append("poll_triggers")
 
+    # Initial heartbeat so the admin UI reflects the current config
+    # immediately, instead of waiting up to 30s for the first poll tick.
+    try:
+        from database.client import upsert_scheduler_status
+        upsert_scheduler_status(
+            auto_search_enabled=config.AUTO_SEARCH_ENABLED,
+            weekly_pipeline_day=config.WEEKLY_PIPELINE_DAY,
+        )
+    except Exception as e:
+        log.warning("scheduler.startup_heartbeat_failed", error=str(e))
+
     return registered
 
 
@@ -271,6 +295,17 @@ def main():
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
+
+    # Initial heartbeat so the admin UI reflects the worker's state right
+    # away, instead of waiting up to 30s for the first poll tick.
+    try:
+        from database.client import upsert_scheduler_status
+        upsert_scheduler_status(
+            auto_search_enabled=config.AUTO_SEARCH_ENABLED,
+            weekly_pipeline_day=config.WEEKLY_PIPELINE_DAY,
+        )
+    except Exception as e:
+        log.warning("scheduler.startup_heartbeat_failed", error=str(e))
 
     log.info("scheduler.started", jobs=[j.id for j in scheduler.get_jobs()])
     try:

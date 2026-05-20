@@ -77,7 +77,15 @@ async def admin_page(_auth: None = Depends(_auth)) -> HTMLResponse:
 
 @router.get("/api/status")
 async def api_status(_auth: None = Depends(_auth)) -> dict:
-    """Return auto_search_enabled + queue depths per enrichment type."""
+    """Return worker state (from the scheduler_status heartbeat) + queue depths.
+
+    auto_search_enabled reflects the WORKER's env var, not this web service's.
+    worker_stale is True when no heartbeat has arrived in >120s (poll interval
+    is 30s, so 4 missed ticks).
+    """
+    from datetime import datetime, timedelta, timezone
+    from database.client import get_scheduler_status
+
     queue_counts: dict[str, int] = {}
     for etype in ("llc_pierce", "zoominfo", "multi_source"):
         res = (
@@ -89,8 +97,29 @@ async def api_status(_auth: None = Depends(_auth)) -> dict:
         )
         queue_counts[etype] = res.count or 0
 
+    sched = get_scheduler_status()
+    auto_search_enabled = False
+    weekly_pipeline_day = None
+    worker_last_seen_at = None
+    worker_stale = True
+
+    if sched:
+        auto_search_enabled = bool(sched.get("auto_search_enabled", False))
+        weekly_pipeline_day = sched.get("weekly_pipeline_day")
+        worker_last_seen_at = sched.get("last_seen_at")
+        if worker_last_seen_at:
+            last_dt = (
+                datetime.fromisoformat(worker_last_seen_at.replace("Z", "+00:00"))
+                if isinstance(worker_last_seen_at, str)
+                else worker_last_seen_at
+            )
+            worker_stale = (datetime.now(timezone.utc) - last_dt) > timedelta(seconds=120)
+
     return {
-        "auto_search_enabled": config.AUTO_SEARCH_ENABLED,
+        "auto_search_enabled": auto_search_enabled,
+        "weekly_pipeline_day": weekly_pipeline_day,
+        "worker_last_seen_at": worker_last_seen_at,
+        "worker_stale": worker_stale,
         "queue": queue_counts,
     }
 
