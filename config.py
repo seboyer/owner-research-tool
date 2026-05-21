@@ -111,6 +111,7 @@ class Config:
     # Per-entity estimates are conservative (overestimate rather than
     # under). Tunable per-stage so you can calibrate from observed spend.
     # ------------------------------------------------------------------
+    SKIP_LOW_VALUE_THRESHOLD: float = float(os.getenv("SKIP_LOW_VALUE_THRESHOLD", "0.30"))
     DAILY_ENRICHMENT_COST_CAP_USD: float = float(os.getenv("DAILY_ENRICHMENT_COST_CAP_USD", "0"))
     COST_PER_ENTITY_LLC_PIERCE: float = float(os.getenv("COST_PER_ENTITY_LLC_PIERCE", "0.30"))
     COST_PER_ENTITY_ACRIS_PDF: float = float(os.getenv("COST_PER_ENTITY_ACRIS_PDF", "0.30"))

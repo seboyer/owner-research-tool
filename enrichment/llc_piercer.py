@@ -27,6 +27,7 @@ from database.client import (
     update_entity, already_seen, mark_seen,
     start_ingestion_log, finish_ingestion_log,
     get_enrichment_batch, mark_enrichment_done, mark_enrichment_failed,
+    reevaluate_for_skip,
 )
 from database.retry import retry_external
 from enrichment.acris_pdf import pierce_llc_via_mortgage
@@ -34,6 +35,25 @@ from ingest.whoownswhat import lookup_entity_in_wow
 
 log = structlog.get_logger(__name__)
 anthropic = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+
+
+def _get_entity_properties(entity_id: str) -> list[dict]:
+    """Fetch the properties linked to an entity via property_roles.
+
+    Returns a list of property dicts with at least unit_count and hpd_reg_id,
+    suitable for passing to skip_filter.evaluate as the properties argument.
+    """
+    res = db().table("property_roles")\
+        .select("properties(id, unit_count, hpd_reg_id)")\
+        .eq("entity_id", entity_id)\
+        .eq("is_current", True)\
+        .execute()
+    props = []
+    for row in (res.data or []):
+        p = row.get("properties") or {}
+        if p:
+            props.append(p)
+    return props
 
 
 # ============================================================
@@ -184,6 +204,8 @@ async def strategy_wow_portfolio(entity: dict) -> bool:
         )
         log.info("llc_piercer.hpd_portfolio_match", entity=entity_name, owner=name, role=ctype)
         found = True
+        parent_props = _get_entity_properties(entity_id)
+        reevaluate_for_skip(owner_entity_id, parent_props, has_owned_by_parents=True)
 
     return found
 
@@ -423,6 +445,8 @@ async def _process_agentic_result(result: dict, entity_id: str, entity_name: str
                  owner=owner_name,
                  confidence=confidence)
         found = True
+        parent_props = _get_entity_properties(entity_id)
+        reevaluate_for_skip(owner_entity_id, parent_props, has_owned_by_parents=True)
 
     return found
 
