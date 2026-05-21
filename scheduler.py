@@ -236,7 +236,14 @@ def main():
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
     )
 
-    log.info("scheduler.starting_standalone")
+    # Log the openai SDK version at boot so we can see at a glance whether
+    # the deployed container is on the version we expect (vs Render's Docker
+    # layer cache serving a stale install).
+    try:
+        import openai as _openai_pkg
+        log.info("scheduler.starting_standalone", openai_version=_openai_pkg.__version__)
+    except Exception:
+        log.info("scheduler.starting_standalone")
 
     # Use BlockingScheduler in standalone mode — no async context needed.
     # The async job functions are wrapped to run in a fresh event loop.
