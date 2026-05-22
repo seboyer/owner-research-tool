@@ -206,3 +206,41 @@ Render.com is the primary deployment target. The Docker container runs `uvicorn 
 **Dependency constraint**: `supabase==2.29.0` requires `httpx>=0.26,<0.29`. Keep `httpx` pinned to `0.28.x`. `anthropic` and `openai` both accept any httpx>=0.23 so they are not the constraint. Upgraded from supabase==2.4.0/httpx==0.25.2 to support the new `sb_secret_` Supabase key format (old JWT service role keys are deprecated).
 
 **Anthropic SDK**: Upgraded from `anthropic==0.28.0` to `==0.97.0` in April 2026. This is a large jump — if pipeline runs fail with unexpected errors in AI calls, check for breaking changes in streaming response shapes, tool use syntax, or message construction between these versions. The codebase was written targeting Claude 4 models so the model names (`claude-opus-4-6`, `claude-sonnet-4-5`) are correct, but response-handling code may need updates if the SDK's object shapes changed.
+
+## Troubleshooting
+
+### Stuck pipeline trigger after worker restart
+
+**Symptom**: The "Run Daily" / "Run Weekly" button in `/admin` stays disabled and shows the pipeline as `running` for much longer than a typical run (compare against recent `ingestion_log` durations — normally 10–50 min). Worker logs show the worker is alive (`scheduler.health` ticks) but no pipeline activity.
+
+**Cause**: The worker received SIGTERM mid-pipeline (Render deploy, dyno cycle, OOM). The `pipeline_triggers` row and any in-flight `ingestion_log` rows are stuck at `status='running'` because the killed worker never closed them. The existing orphan-cleanup in `claim_next_pipeline_trigger` only fires for triggers >12h old, so anything more recent has to be cleared manually.
+
+**Diagnose**:
+```sql
+SELECT id, pipeline, status, requested_at, started_at, finished_at
+FROM pipeline_triggers
+WHERE status = 'running'
+ORDER BY requested_at DESC;
+
+SELECT id, source, status, run_started_at
+FROM ingestion_log
+WHERE status = 'running'
+ORDER BY run_started_at DESC;
+```
+
+**Fix** (manual unblock):
+```sql
+UPDATE pipeline_triggers
+SET status = 'failed', finished_at = NOW(),
+    error_message = 'orphaned by worker restart'
+WHERE id = <stuck_trigger_id>;
+
+UPDATE ingestion_log
+SET status = 'failed', run_finished_at = NOW(),
+    error_message = 'orphaned by worker restart'
+WHERE id IN ('<stuck_uuid>', ...);
+```
+
+After running these, the button unlocks and a fresh "Run Daily" can be triggered.
+
+**Better long-term fix (not yet implemented)**: on worker boot, mark any `pipeline_triggers` with `status='running' AND started_at < worker_boot_time` as failed. Robust to long-running pipelines — a heartbeat-staleness approach doesn't work because legitimate full-load / weekly runs can take hours. The boot-time signal is correct by construction: a "running" trigger started before the current worker booted must belong to a dead worker.
