@@ -329,9 +329,15 @@ async def process_pdf_signers(
     Store extracted signer information as entities + relationships.
     A signer is an individual linked to the LLC as its real owner.
     """
+    from enrichment.skip_filter import is_human_name
+
     for signer in extracted.get("signers", []):
         full_name = signer.get("full_name", "").strip()
         if not full_name or len(full_name) < 3:
+            continue
+        if not is_human_name(full_name):
+            log.warning("acris_pdf.signer_rejected_not_human",
+                        doc_id=document_id, llc=llc_name, extracted=full_name)
             continue
         confidence = signer.get("confidence", 0.8)
         role = signer.get("role", "managing_member")
