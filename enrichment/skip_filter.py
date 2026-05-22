@@ -32,6 +32,12 @@ _DECEASED_RE = re.compile(
     re.IGNORECASE,
 )
 
+_CORPORATE_SUFFIX_RE = re.compile(
+    r"\b(LLC|L\.L\.C\.?|INC\.?|CORP\.?|CORPORATION|LTD\.?|"
+    r"LP|L\.P\.?|LLP|L\.L\.P\.?|COMPANY)\b",
+    re.IGNORECASE,
+)
+
 _INDIVIDUAL_TYPES = {"individual", "unknown", None}
 
 
@@ -51,6 +57,22 @@ def is_lawyer_name(name: str) -> bool:
     if not name:
         return False
     return bool(_LAWYER_RE.search(name))
+
+
+def is_human_name(name: str) -> bool:
+    """Return True if the name looks like a real person, not a company.
+
+    Used to validate extracted mortgage signer names from Claude Vision —
+    a signer is always a human, so a corporate suffix in the extracted
+    string means the model misread the document. Conservative on purpose:
+    rejects on any unambiguous corporate suffix (LLC, INC, CORP, LTD, LP,
+    LLP, COMPANY). Edge cases like "Jane Smith Realty, L.L.C." get
+    rejected — acceptable trade-off because the alternative is writing
+    a company name into the contacts table as a human signer.
+    """
+    if not name or len(name.strip()) < 3:
+        return False
+    return not _CORPORATE_SUFFIX_RE.search(name)
 
 
 def evaluate(entity: dict, properties: list[dict] | None = None) -> SkipDecision | None:
