@@ -554,7 +554,11 @@ def mark_enrichment_failed(entity_id: str, enrichment_type: str, error: str):
             existing = (ent[0].get("notes") or "").strip() if ent else ""
             note = f"[enrichment_failed:{enrichment_type}] {error}"
             merged = f"{existing}\n{note}".strip() if existing else note
-            update_entity(entity_id, {"enrichment_status": "failed", "notes": merged})
+            # Write skip log with repeated_source_errors reason so this entity
+            # appears in the admin /skipped view for review rather than just
+            # going silently to 'failed'. Keep notes append for backward compat.
+            _write_skip_log(entity_id, "repeated_source_errors", 0.0, error[:500])
+            update_entity(entity_id, {"enrichment_status": "skipped", "notes": merged})
     else:
         db().table("enrichment_queue").update({
             "attempts": attempts,

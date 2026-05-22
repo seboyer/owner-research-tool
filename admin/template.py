@@ -129,6 +129,64 @@ ADMIN_HTML = """<!DOCTYPE html>
     margin-bottom: 10px;
     font-size: 13px;
   }
+  .nav-tabs {
+    background: #fff;
+    border-bottom: 1px solid #e5e7eb;
+    padding: 0 24px;
+    display: flex;
+    gap: 0;
+  }
+  .nav-tab {
+    padding: 10px 18px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #6b7280;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    background: none;
+    border-top: none;
+    border-left: none;
+    border-right: none;
+  }
+  .nav-tab:hover { color: #111; }
+  .nav-tab.active { color: #1a1a2e; border-bottom-color: #1a1a2e; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  .filter-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .filter-row label { font-size: 12px; color: #555; }
+  .filter-row input, .filter-row select {
+    padding: 5px 8px;
+    border: 1px solid #d1d5db;
+    border-radius: 5px;
+    font-size: 13px;
+  }
+  .skipped-summary {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+    padding: 10px 14px;
+    background: #fafafa;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  .skipped-summary-item { color: #374151; }
+  .skipped-summary-item strong { color: #1a1a2e; }
+  .pagination-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-top: 12px;
+    font-size: 13px;
+    color: #555;
+  }
 </style>
 </head>
 <body>
@@ -150,6 +208,12 @@ ADMIN_HTML = """<!DOCTYPE html>
   </div>
 </div>
 
+<nav class="nav-tabs">
+  <button class="nav-tab active" onclick="showTab('allowlists')">Allowlists &amp; Runs</button>
+  <button class="nav-tab" onclick="showTab('skipped')">Skipped Entities</button>
+</nav>
+
+<div id="tab-allowlists" class="tab-panel active">
 <main>
   <!-- ===== LEFT: Allowlists ===== -->
   <section>
@@ -209,6 +273,61 @@ ADMIN_HTML = """<!DOCTYPE html>
     </table>
   </section>
 </main>
+</div><!-- /tab-allowlists -->
+
+<div id="tab-skipped" class="tab-panel">
+<section style="max-width:1400px; padding:20px 24px;">
+  <h2>Skipped Entities</h2>
+  <div id="skipped-summary" class="skipped-summary">Loading summary&hellip;</div>
+  <div class="filter-row">
+    <label>Reason:
+      <select id="skipped-reason-filter" onchange="loadSkipped()">
+        <option value="">All reasons</option>
+      </select>
+    </label>
+    <label>Min score:
+      <input type="number" id="skipped-min-score" min="0" max="1" step="0.01" style="width:70px"
+        placeholder="0.0" onchange="loadSkipped()">
+    </label>
+    <label>Max score:
+      <input type="number" id="skipped-max-score" min="0" max="1" step="0.01" style="width:70px"
+        placeholder="1.0" onchange="loadSkipped()">
+    </label>
+    <label>Sort:
+      <select id="skipped-sort" onchange="loadSkipped()">
+        <option value="score_desc">Score (lowest first)</option>
+        <option value="skipped_at_desc">Skipped at (newest first)</option>
+      </select>
+    </label>
+    <button class="btn" onclick="loadSkipped()">Refresh</button>
+    <button class="btn btn-primary" id="btn-requeue-reason"
+      onclick="requeueSkippedByReason()"
+      style="margin-left:auto" disabled>
+      Re-queue all matching reason
+    </button>
+  </div>
+  <div id="skipped-loading" class="loading">Loading&hellip;</div>
+  <table id="skipped-table" style="display:none">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Type</th>
+        <th>Reason</th>
+        <th>Score</th>
+        <th>Evidence</th>
+        <th>Skipped At</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody id="skipped-body"></tbody>
+  </table>
+  <div class="pagination-row" id="skipped-pagination" style="display:none">
+    <button class="btn" id="skipped-prev" onclick="skippedPage(-1)">&larr; Prev</button>
+    <span id="skipped-page-info"></span>
+    <button class="btn" id="skipped-next" onclick="skippedPage(1)">Next &rarr;</button>
+  </div>
+</section>
+</div><!-- /tab-skipped -->
 
 <script>
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -497,6 +616,198 @@ async function toggleBorough(code, enabled) {
   } catch(e) {
     alert('Failed to toggle borough ' + code + ': ' + e);
     loadBoroughs();
+  }
+}
+
+// ── tab switching ─────────────────────────────────────────────────────────────
+
+let _skippedLoaded = false;
+
+function showTab(name) {
+  document.querySelectorAll('.nav-tab').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(el => el.classList.remove('active'));
+  const activeBtn = document.querySelector('.nav-tab[onclick="showTab(\\''+name+'\\')"]');
+  if (activeBtn) activeBtn.classList.add('active');
+  const panel = document.getElementById('tab-' + name);
+  if (panel) panel.classList.add('active');
+  if (name === 'skipped' && !_skippedLoaded) {
+    _skippedLoaded = true;
+    loadSkippedSummary();
+    loadSkipped();
+  }
+}
+
+// ── skipped entities ──────────────────────────────────────────────────────────
+
+let _skippedOffset = 0;
+const _skippedLimit = 50;
+let _skippedTotal = 0;
+
+function _skippedFilterParams() {
+  const params = new URLSearchParams();
+  params.set('limit', _skippedLimit);
+  params.set('offset', _skippedOffset);
+  const reason = document.getElementById('skipped-reason-filter').value;
+  if (reason) params.set('reason', reason);
+  const minScore = document.getElementById('skipped-min-score').value;
+  if (minScore !== '') params.set('min_score', minScore);
+  const maxScore = document.getElementById('skipped-max-score').value;
+  if (maxScore !== '') params.set('max_score', maxScore);
+  const sort = document.getElementById('skipped-sort').value;
+  params.set('sort', sort);
+  return params;
+}
+
+async function loadSkipped() {
+  _skippedOffset = 0;
+  await _fetchSkipped();
+}
+
+async function _fetchSkipped() {
+  document.getElementById('skipped-loading').style.display = '';
+  document.getElementById('skipped-table').style.display = 'none';
+  document.getElementById('skipped-pagination').style.display = 'none';
+  try {
+    const params = _skippedFilterParams();
+    const r = await fetch('/admin/api/skipped?' + params.toString());
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    _skippedTotal = d.total || 0;
+    const rows = d.rows || [];
+    const tbody = document.getElementById('skipped-body');
+    tbody.innerHTML = '';
+    rows.forEach(row => {
+      const tr = document.createElement('tr');
+      const evidence = (row.evidence || '').substring(0, 120);
+      tr.setAttribute('data-entity-id', row.entity_id);
+      tr.innerHTML = `
+        <td>${row.name || '<em>unknown</em>'}</td>
+        <td>${row.entity_type || '—'}</td>
+        <td><code>${row.reason || '—'}</code></td>
+        <td>${row.score != null ? Number(row.score).toFixed(3) : '—'}</td>
+        <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${(row.evidence||'').replace(/"/g,'&quot;')}">${evidence || '—'}</td>
+        <td>${fmtDate(row.skipped_at)}</td>
+        <td><button class="btn" onclick="requeueSkipped('${row.entity_id}', this)">Re-queue</button></td>`;
+      tbody.appendChild(tr);
+    });
+    document.getElementById('skipped-loading').style.display = 'none';
+    document.getElementById('skipped-table').style.display = '';
+
+    // pagination
+    const pageInfo = document.getElementById('skipped-page-info');
+    const start = _skippedOffset + 1;
+    const end = Math.min(_skippedOffset + _skippedLimit, _skippedTotal);
+    pageInfo.textContent = _skippedTotal > 0 ? (start + '–' + end + ' of ' + _skippedTotal) : '0 results';
+    document.getElementById('skipped-prev').disabled = _skippedOffset <= 0;
+    document.getElementById('skipped-next').disabled = (_skippedOffset + _skippedLimit) >= _skippedTotal;
+    if (_skippedTotal > 0) document.getElementById('skipped-pagination').style.display = '';
+  } catch(e) {
+    document.getElementById('skipped-loading').textContent = 'Error loading skipped entities: ' + e;
+  }
+}
+
+function skippedPage(direction) {
+  _skippedOffset = Math.max(0, _skippedOffset + direction * _skippedLimit);
+  _fetchSkipped();
+}
+
+async function loadSkippedSummary() {
+  try {
+    const r = await fetch('/admin/api/skipped/summary');
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    const summary = document.getElementById('skipped-summary');
+    const byReason = d.by_reason || {};
+    const total = d.total || 0;
+    if (total === 0) {
+      summary.textContent = 'No currently-skipped entities.';
+    } else {
+      let html = '<span class="skipped-summary-item">Total skipped: <strong>' + total + '</strong></span>';
+      Object.entries(byReason).sort((a,b) => b[1]-a[1]).forEach(([reason, count]) => {
+        html += '<span class="skipped-summary-item"><code>' + reason + '</code>: <strong>' + count + '</strong></span>';
+      });
+      summary.innerHTML = html;
+    }
+
+    // Populate reason dropdown
+    const sel = document.getElementById('skipped-reason-filter');
+    // preserve current selection
+    const current = sel.value;
+    while (sel.options.length > 1) sel.remove(1);
+    Object.keys(byReason).sort().forEach(reason => {
+      const opt = document.createElement('option');
+      opt.value = reason;
+      opt.textContent = reason + ' (' + byReason[reason] + ')';
+      sel.appendChild(opt);
+    });
+    if (current && sel.querySelector('option[value="'+current+'"]')) sel.value = current;
+
+    // Enable/disable bulk requeue button based on reason filter
+    _updateRequeueReasonBtn();
+  } catch(e) {
+    document.getElementById('skipped-summary').textContent = 'Error loading summary: ' + e;
+  }
+}
+
+function _updateRequeueReasonBtn() {
+  const reason = document.getElementById('skipped-reason-filter').value;
+  document.getElementById('btn-requeue-reason').disabled = !reason;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const sel = document.getElementById('skipped-reason-filter');
+  if (sel) sel.addEventListener('change', _updateRequeueReasonBtn);
+});
+
+async function requeueSkipped(entity_id, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/admin/api/skipped/requeue', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({entity_id}),
+    });
+    if (!r.ok) throw new Error(r.status);
+    // optimistically remove row
+    const row = document.querySelector('tr[data-entity-id="'+entity_id+'"]');
+    if (row) row.remove();
+    _skippedTotal = Math.max(0, _skippedTotal - 1);
+    const pageInfo = document.getElementById('skipped-page-info');
+    if (pageInfo) {
+      const start = _skippedOffset + 1;
+      const end = Math.min(_skippedOffset + _skippedLimit, _skippedTotal);
+      pageInfo.textContent = _skippedTotal > 0 ? (start + '–' + end + ' of ' + _skippedTotal) : '0 results';
+    }
+  } catch(e) {
+    alert('Re-queue failed: ' + e);
+    if (btn) btn.disabled = false;
+    _fetchSkipped();
+  }
+}
+
+async function requeueSkippedByReason() {
+  const reason = document.getElementById('skipped-reason-filter').value;
+  if (!reason) { alert('Select a reason filter first.'); return; }
+  if (!confirm('Re-queue all currently-skipped entities with reason "' + reason + '"? This may take a few seconds.')) return;
+  const btn = document.getElementById('btn-requeue-reason');
+  btn.disabled = true;
+  btn.textContent = 'Re-queuing…';
+  try {
+    const r = await fetch('/admin/api/skipped/requeue', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({reason}),
+    });
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    alert('Re-queued ' + d.count + ' entities.');
+    loadSkippedSummary();
+    loadSkipped();
+  } catch(e) {
+    alert('Bulk re-queue failed: ' + e);
+  } finally {
+    btn.textContent = 'Re-queue all matching reason';
+    _updateRequeueReasonBtn();
   }
 }
 

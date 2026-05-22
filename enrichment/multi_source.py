@@ -33,8 +33,10 @@ from database.client import (
     db, upsert_contact, update_entity,
     start_ingestion_log, finish_ingestion_log,
     get_enrichment_batch, mark_enrichment_done, mark_enrichment_failed,
+    _write_skip_log,
 )
 from database.retry import retry_external
+from enrichment.contact.sources import SourceResult, SourceStatus
 
 log = structlog.get_logger(__name__)
 anthropic = Anthropic(api_key=config.ANTHROPIC_API_KEY)
@@ -86,7 +88,7 @@ async def enrich_via_ai_web_search(
     entity_name: str,
     entity_type: str,
     address: str = "",
-) -> bool:
+) -> SourceResult:
     """
     Use Claude with web search to find contact info for any entity.
     This is a general-purpose fallback that works for any entity type.
@@ -131,7 +133,7 @@ async def enrich_via_ai_web_search(
 
         json_match = re.search(r"\{.*\}", text, re.DOTALL)
         if not json_match:
-            return False
+            return SourceResult(status=SourceStatus.OK_NO_DATA)
 
         result = json.loads(json_match.group())
         contacts = result.get("contacts", [])
@@ -162,11 +164,12 @@ async def enrich_via_ai_web_search(
 
         if written:
             log.info("multi_source.ai_found", entity=entity_name, count=written)
-        return written > 0
+            return SourceResult(status=SourceStatus.OK_FOUND)
+        return SourceResult(status=SourceStatus.OK_NO_DATA)
 
     except Exception as e:
         log.warning("multi_source.ai_error", entity=entity_name, error=str(e))
-        return False
+        return SourceResult(status=SourceStatus.ERRORED, error=str(e))
 
 
 # ============================================================
@@ -203,7 +206,7 @@ async def enrich_via_whitepages(
     address: str = "",
     city: str = "New York",
     state: str = "NY",
-) -> bool:
+) -> SourceResult:
     """
     Look up an individual via Whitepages v2 person endpoint and upsert phone/email.
     WHITEPAGES_API_KEY must be set on the worker service.
@@ -211,7 +214,7 @@ async def enrich_via_whitepages(
     api_key = config.__dict__.get("WHITEPAGES_API_KEY") or \
                __import__("os").getenv("WHITEPAGES_API_KEY", "")
     if not api_key:
-        return False
+        return SourceResult(status=SourceStatus.SKIPPED_NO_KEY)
 
     async with httpx.AsyncClient() as client:
         try:
@@ -220,7 +223,7 @@ async def enrich_via_whitepages(
             # docs note this is normal; treat it as no-result rather than error.
             people = resp.json() or []
             if not people:
-                return False
+                return SourceResult(status=SourceStatus.OK_NO_DATA)
 
             person = people[0]
             phones = person.get("phones") or []
@@ -238,7 +241,7 @@ async def enrich_via_whitepages(
                 email = e0.get("email") or e0.get("email_address")
 
             if not (phone or email):
-                return False
+                return SourceResult(status=SourceStatus.OK_NO_DATA)
 
             upsert_contact(entity_id, {
                 "full_name": person.get("name") or full_name,
@@ -250,19 +253,20 @@ async def enrich_via_whitepages(
             })
             log.info("multi_source.whitepages_found", entity=full_name,
                      has_phone=bool(phone), has_email=bool(email))
-            return True
+            return SourceResult(status=SourceStatus.OK_FOUND)
 
         except httpx.HTTPStatusError as e:
             # 404 = no records matched the query — normal, not an error.
             if e.response.status_code == 404:
-                return False
+                return SourceResult(status=SourceStatus.OK_NO_DATA)
             log.warning("multi_source.whitepages_http_error",
                         entity=full_name, status=e.response.status_code,
                         body=e.response.text[:200])
+            return SourceResult(status=SourceStatus.ERRORED,
+                                error=f"HTTP {e.response.status_code}")
         except Exception as e:
             log.warning("multi_source.whitepages_error", entity=full_name, error=str(e))
-
-    return False
+            return SourceResult(status=SourceStatus.ERRORED, error=str(e))
 
 
 # ============================================================
@@ -295,14 +299,14 @@ async def enrich_via_apollo(
     entity_id: str,
     full_name: str,
     company: str | None = None,
-) -> bool:
+) -> SourceResult:
     """
     Look up a person's email + phone via Apollo.io /v1/people/match.
     APOLLO_API_KEY must be set (on the worker service in production).
     """
     api_key = config.APOLLO_API_KEY
     if not api_key:
-        return False
+        return SourceResult(status=SourceStatus.SKIPPED_NO_KEY)
 
     async with httpx.AsyncClient() as client:
         try:
@@ -310,14 +314,14 @@ async def enrich_via_apollo(
             data = resp.json() or {}
             person = data.get("person") or {}
             if not person:
-                return False
+                return SourceResult(status=SourceStatus.OK_NO_DATA)
 
             email = person.get("email")
             phones = person.get("phone_numbers") or []
             phone = phones[0].get("sanitized_number") if phones else None
 
             if not (email or phone):
-                return False
+                return SourceResult(status=SourceStatus.OK_NO_DATA)
 
             name_parts = (person.get("name") or full_name).rsplit(" ", 1)
             upsert_contact(entity_id, {
@@ -332,10 +336,10 @@ async def enrich_via_apollo(
             })
             log.info("multi_source.apollo_found", entity=full_name,
                      has_email=bool(email), has_phone=bool(phone))
-            return True
+            return SourceResult(status=SourceStatus.OK_FOUND)
         except Exception as e:
             log.warning("multi_source.apollo_error", entity=full_name, error=str(e))
-            return False
+            return SourceResult(status=SourceStatus.ERRORED, error=str(e))
 
 
 # ============================================================
@@ -346,14 +350,14 @@ async def enrich_via_apollo(
 # Auth: Bearer token. Docs: https://app.batchdata.com/docs/api/v3
 # ============================================================
 
-async def enrich_via_batchdata(entity_id: str, entity_name: str) -> bool:
+async def enrich_via_batchdata(entity_id: str, entity_name: str) -> SourceResult:
     """
     Skip-trace the property linked to this entity via BatchData V3 and write
     the matched person's contact info. Reuses the existing
     enrichment.contact.sources.batchdata.skip_trace_property helper.
     """
     if not config.BATCHDATA_API_KEY:
-        return False
+        return SourceResult(status=SourceStatus.SKIPPED_NO_KEY)
 
     # Find a property address for this entity.
     roles_res = db().table("property_roles")\
@@ -363,7 +367,7 @@ async def enrich_via_batchdata(entity_id: str, entity_name: str) -> bool:
         .limit(1)\
         .execute()
     if not roles_res.data:
-        return False
+        return SourceResult(status=SourceStatus.OK_NO_DATA)
 
     prop = roles_res.data[0].get("properties") or {}
     house = (prop.get("house_number") or "").strip()
@@ -372,7 +376,7 @@ async def enrich_via_batchdata(entity_id: str, entity_name: str) -> bool:
     zip_code = (prop.get("zip_code") or "").strip()
     if not street or not zip_code:
         # BatchData needs at least street + zip (or street + city).
-        return False
+        return SourceResult(status=SourceStatus.OK_NO_DATA)
 
     try:
         from enrichment.contact.sources.batchdata import skip_trace_property
@@ -384,17 +388,17 @@ async def enrich_via_batchdata(entity_id: str, entity_name: str) -> bool:
         )
     except Exception as e:
         log.warning("multi_source.batchdata_error", entity=entity_name, error=str(e))
-        return False
+        return SourceResult(status=SourceStatus.ERRORED, error=str(e))
 
     if not hits:
-        return False
+        return SourceResult(status=SourceStatus.OK_NO_DATA)
 
     # Take the first returned person (treated as primary property owner by
     # prong1_signer.py, same convention here). Match Whitepages/Apollo
     # behavior: only upsert if we got a real email or phone.
     hit = hits[0]
     if not (hit.email or hit.phone):
-        return False
+        return SourceResult(status=SourceStatus.OK_NO_DATA)
 
     upsert_contact(entity_id, {
         "first_name": hit.first_name,
@@ -408,7 +412,7 @@ async def enrich_via_batchdata(entity_id: str, entity_name: str) -> bool:
     })
     log.info("multi_source.batchdata_found", entity=entity_name,
              matched=hit.full_name, has_email=bool(hit.email), has_phone=bool(hit.phone))
-    return True
+    return SourceResult(status=SourceStatus.OK_FOUND)
 
 
 # ============================================================
@@ -435,7 +439,7 @@ async def enrich_via_propertyradar(
     entity_id: str,
     entity_name: str,
     bbl: str = "",
-) -> bool:
+) -> SourceResult:
     """
     Look up property owner contact info via PropertyRadar.
     Add PROPERTYRADAR_API_KEY to .env.
@@ -445,7 +449,7 @@ async def enrich_via_propertyradar(
     """
     api_key = __import__("os").getenv("PROPERTYRADAR_API_KEY", "")
     if not api_key:
-        return False
+        return SourceResult(status=SourceStatus.SKIPPED_NO_KEY)
 
     # PropertyRadar uses APN (Assessor's Parcel Number) or owner name search
     async with httpx.AsyncClient() as client:
@@ -456,7 +460,7 @@ async def enrich_via_propertyradar(
             properties = data.get("results", [])
 
             if not properties:
-                return False
+                return SourceResult(status=SourceStatus.OK_NO_DATA)
 
             # Get contact info for the first match
             prop = properties[0]
@@ -479,12 +483,13 @@ async def enrich_via_propertyradar(
                     "raw_data": prop,
                 })
                 log.info("multi_source.propertyradar_found", entity=entity_name)
-                return True
+                return SourceResult(status=SourceStatus.OK_FOUND)
+
+            return SourceResult(status=SourceStatus.OK_NO_DATA)
 
         except Exception as e:
             log.warning("multi_source.propertyradar_error", entity=entity_name, error=str(e))
-
-    return False
+            return SourceResult(status=SourceStatus.ERRORED, error=str(e))
 
 
 # ============================================================
@@ -530,7 +535,7 @@ async def enrich_via_google_places(
     entity_id: str,
     entity_name: str,
     address: str = "",
-) -> bool:
+) -> SourceResult:
     """
     Look up a business in Google Places to get phone + website.
     Works well for management companies that have a public Google listing.
@@ -538,7 +543,7 @@ async def enrich_via_google_places(
     """
     api_key = __import__("os").getenv("GOOGLE_PLACES_API_KEY", "")
     if not api_key:
-        return False
+        return SourceResult(status=SourceStatus.SKIPPED_NO_KEY)
 
     async with httpx.AsyncClient() as client:
         try:
@@ -548,7 +553,7 @@ async def enrich_via_google_places(
             places = data.get("results", [])
 
             if not places:
-                return False
+                return SourceResult(status=SourceStatus.OK_NO_DATA)
 
             place = places[0]
             place_id = place.get("place_id")
@@ -572,12 +577,13 @@ async def enrich_via_google_places(
                     "raw_data": {"website": website, "google_place_id": place_id},
                 })
                 log.info("multi_source.google_places_found", entity=entity_name)
-                return True
+                return SourceResult(status=SourceStatus.OK_FOUND)
+
+            return SourceResult(status=SourceStatus.OK_NO_DATA)
 
         except Exception as e:
             log.warning("multi_source.google_places_error", entity=entity_name, error=str(e))
-
-    return False
+            return SourceResult(status=SourceStatus.ERRORED, error=str(e))
 
 
 # ============================================================
@@ -601,14 +607,16 @@ async def enrich_via_hunter(
     entity_id: str,
     entity_name: str,
     domain: str = "",
-) -> bool:
+) -> SourceResult:
     """
     Use Hunter.io to find email addresses for a domain/company.
     Add HUNTER_API_KEY to .env.
     """
     api_key = __import__("os").getenv("HUNTER_API_KEY", "")
-    if not api_key or not domain:
-        return False
+    if not api_key:
+        return SourceResult(status=SourceStatus.SKIPPED_NO_KEY)
+    if not domain:
+        return SourceResult(status=SourceStatus.OK_NO_DATA)
 
     async with httpx.AsyncClient() as client:
         try:
@@ -639,12 +647,12 @@ async def enrich_via_hunter(
 
             if found:
                 log.info("multi_source.hunter_found", entity=entity_name, count=len(emails))
-            return found
+                return SourceResult(status=SourceStatus.OK_FOUND)
+            return SourceResult(status=SourceStatus.OK_NO_DATA)
 
         except Exception as e:
             log.warning("multi_source.hunter_error", entity=entity_name, error=str(e))
-
-    return False
+            return SourceResult(status=SourceStatus.ERRORED, error=str(e))
 
 
 # ============================================================
@@ -689,7 +697,7 @@ async def enrich_via_proxycurl(
     entity_id: str,
     full_name: str,
     company_name: str = "",
-) -> bool:
+) -> SourceResult:
     """
     Use Proxycurl to find a person's LinkedIn profile and contact info.
     Add PROXYCURL_API_KEY to .env.
@@ -697,7 +705,7 @@ async def enrich_via_proxycurl(
     """
     api_key = __import__("os").getenv("PROXYCURL_API_KEY", "")
     if not api_key:
-        return False
+        return SourceResult(status=SourceStatus.SKIPPED_NO_KEY)
 
     async with httpx.AsyncClient() as client:
         try:
@@ -709,7 +717,7 @@ async def enrich_via_proxycurl(
             linkedin_url = data.get("url")
 
             if not linkedin_url:
-                return False
+                return SourceResult(status=SourceStatus.OK_NO_DATA)
 
             # Now get the profile details
             profile_resp = await _fetch_proxycurl_profile(client, linkedin_url, api_key)
@@ -733,36 +741,37 @@ async def enrich_via_proxycurl(
                     "confidence": 0.85,
                 })
                 log.info("multi_source.proxycurl_found", entity=full_name)
-                return True
+                return SourceResult(status=SourceStatus.OK_FOUND)
+
+            return SourceResult(status=SourceStatus.OK_NO_DATA)
 
         except Exception as e:
             log.warning("multi_source.proxycurl_error", entity=full_name, error=str(e))
-
-    return False
+            return SourceResult(status=SourceStatus.ERRORED, error=str(e))
 
 
 # ============================================================
 # Orchestrated Multi-Source Enrichment
 # ============================================================
 
-async def enrich_entity(entity: dict) -> bool:
+async def enrich_entity(entity: dict) -> tuple[bool, list[SourceResult]]:
     """
     Run all available enrichment sources for an entity.
     Chooses the right sources based on entity type and what info we already have.
-    Returns True if we found any contact info.
+
+    Returns (found_any, results) where:
+      - found_any: True if at least one contact was written
+      - results:   list of SourceResult for all sources that were invoked
     """
     entity_id = entity["id"]
     entity_name = entity["name"]
     entity_type = entity.get("entity_type", "unknown")
     address = entity.get("address", "")
 
-    found_any = False
+    results: list[SourceResult] = []
 
     # Check if we already have good contacts — short-circuit to avoid paying
-    # for re-enrichment of entities we already have data for. Returning False
-    # here makes the run accounting honest (records_created counts only
-    # entities where NEW contacts were written; this entity goes to
-    # records_skipped instead).
+    # for re-enrichment of entities we already have data for.
     existing = db().table("contacts")\
         .select("id")\
         .eq("entity_id", entity_id)\
@@ -772,16 +781,20 @@ async def enrich_entity(entity: dict) -> bool:
 
     if existing.data:
         log.info("multi_source.already_has_contacts", entity=entity_name)
-        return False
+        # Returning an empty results list here causes the aggregator to treat
+        # this as "no sources tried" → mark_enrichment_done (not a failure).
+        return False, []
 
     # Management companies + larger firms → Google Places first
     if entity_type in ("management_company", "corporation") or \
        "management" in entity_name.lower() or "realty" in entity_name.lower():
-        found_any |= await enrich_via_google_places(entity_id, entity_name, address)
+        r = await enrich_via_google_places(entity_id, entity_name, address)
+        results.append(r)
         await asyncio.sleep(0.5)
 
     # AI web search — works for any entity type
-    found_any |= await enrich_via_ai_web_search(entity_id, entity_name, entity_type, address)
+    r = await enrich_via_ai_web_search(entity_id, entity_name, entity_type, address)
+    results.append(r)
     await asyncio.sleep(0.5)
 
     # Individuals → BatchData + Apollo + PropertyRadar + Whitepages + Proxycurl
@@ -790,11 +803,13 @@ async def enrich_entity(entity: dict) -> bool:
     ):
         # BatchData V3 skip trace — highest-yield source per testing.
         # ~$0.40 per matched property; goes first so the best source wins.
-        found_any |= await enrich_via_batchdata(entity_id, entity_name)
+        r = await enrich_via_batchdata(entity_id, entity_name)
+        results.append(r)
         await asyncio.sleep(0.5)
 
         # Apollo.io — cheap (~$0.05) person match, high quality when it hits.
-        found_any |= await enrich_via_apollo(entity_id, entity_name)
+        r = await enrich_via_apollo(entity_id, entity_name)
+        results.append(r)
         await asyncio.sleep(0.5)
 
         # PropertyRadar — best for property owners
@@ -808,18 +823,22 @@ async def enrich_entity(entity: dict) -> bool:
             bbl = roles.data[0].get("properties", {}).get("bbl", "")
 
         if bbl:
-            found_any |= await enrich_via_propertyradar(entity_id, entity_name, bbl)
+            r = await enrich_via_propertyradar(entity_id, entity_name, bbl)
+            results.append(r)
             await asyncio.sleep(0.5)
 
         # Whitepages for residential landlords
-        found_any |= await enrich_via_whitepages(entity_id, entity_name)
+        r = await enrich_via_whitepages(entity_id, entity_name)
+        results.append(r)
         await asyncio.sleep(0.5)
 
         # LinkedIn via Proxycurl
-        found_any |= await enrich_via_proxycurl(entity_id, entity_name)
+        r = await enrich_via_proxycurl(entity_id, entity_name)
+        results.append(r)
         await asyncio.sleep(0.5)
 
-    return found_any
+    found_any = any(r.status == SourceStatus.OK_FOUND for r in results)
+    return found_any, results
 
 
 async def run_batch(batch_size: int = 100):
@@ -864,23 +883,49 @@ async def run_batch(batch_size: int = 100):
                 if not entity or not entity.get("id"):
                     continue
                 entity_id = entity["id"]
+                entity_name = entity.get("name", entity_id)
                 try:
                     # First job to pick up this entity flips 'pending' -> 'in_progress'.
                     if entity.get("enrichment_status") == "pending":
                         update_entity(entity_id, {"enrichment_status": "in_progress"})
-                    found = await enrich_entity(entity)
-                    mark_enrichment_done(entity_id, "multi_source")
+                    found, source_results = await enrich_entity(entity)
                     tracker.add("multi_source_enrich", per_entity_cost)
-                    if found:
-                        stats["records_created"] += 1
-                    else:
-                        # Sources ran, no new contact written. Distinct from
-                        # records_skipped which is reserved for entities we
-                        # didn't process (allowlist/cap filtering).
+
+                    # Decide done vs failed based on source outcome counts.
+                    # A run where every source that actually *tried* returned an
+                    # error is treated as a real failure (increment retry counter).
+                    # If everything was skipped (no keys) or at least one source
+                    # ran cleanly, we call mark_enrichment_done.
+                    tried = sum(
+                        1 for r in source_results
+                        if r.status in (SourceStatus.OK_FOUND, SourceStatus.OK_NO_DATA, SourceStatus.ERRORED)
+                    )
+                    errored = sum(
+                        1 for r in source_results if r.status == SourceStatus.ERRORED
+                    )
+
+                    if tried > 0 and tried == errored:
+                        # Every source that ran produced an error — real failure.
+                        error_msgs = "; ".join(
+                            r.error for r in source_results
+                            if r.status == SourceStatus.ERRORED and r.error
+                        )
+                        log.warning("multi_source.all_sources_errored",
+                                    entity=entity_name, errors=error_msgs)
+                        mark_enrichment_failed(entity_id, "multi_source", error_msgs)
                         stats["records_no_match"] += 1
+                    else:
+                        mark_enrichment_done(entity_id, "multi_source")
+                        if found:
+                            stats["records_created"] += 1
+                        else:
+                            # Sources ran, no new contact written. Distinct from
+                            # records_skipped which is reserved for entities we
+                            # didn't process (allowlist/cap filtering).
+                            stats["records_no_match"] += 1
                 except Exception as e:
                     err = f"{type(e).__name__}: {e}"
-                    log.error("multi_source.entity_error", entity=entity.get("name"), error=err)
+                    log.error("multi_source.entity_error", entity=entity_name, error=err)
                     mark_enrichment_failed(entity_id, "multi_source", err)
 
                 if tracker.cap_hit:

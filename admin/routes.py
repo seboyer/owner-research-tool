@@ -378,3 +378,156 @@ async def run_daily(_auth: None = Depends(_auth)) -> dict:
 @router.post("/run/weekly")
 async def run_weekly(_auth: None = Depends(_auth)) -> dict:
     return _queue_trigger("weekly")
+
+
+# ============================================================
+# Skipped entities
+# ============================================================
+
+class RequeueBody(BaseModel):
+    entity_id: Optional[str] = None
+    reason: Optional[str] = None
+
+
+@router.get("/api/skipped")
+async def api_skipped(
+    reason: Optional[str] = Query(default=None),
+    min_score: Optional[float] = Query(default=None, ge=0.0, le=1.0),
+    max_score: Optional[float] = Query(default=None, ge=0.0, le=1.0),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    sort: str = Query(default="score_desc"),
+    _auth: None = Depends(_auth),
+) -> dict:
+    """Return currently-skipped entities (requeued_at IS NULL) with optional filters."""
+    try:
+        # Count query
+        count_q = (
+            db()
+            .table("enrichment_skip_log")
+            .select("entity_id", count="exact")
+            .is_("requeued_at", "null")
+        )
+        if reason:
+            count_q = count_q.eq("reason", reason)
+        if min_score is not None:
+            count_q = count_q.gte("score", min_score)
+        if max_score is not None:
+            count_q = count_q.lte("score", max_score)
+        count_res = count_q.execute()
+        total = count_res.count or 0
+
+        # Data query
+        data_q = (
+            db()
+            .table("enrichment_skip_log")
+            .select("entity_id, reason, score, evidence, skipped_at")
+            .is_("requeued_at", "null")
+        )
+        if reason:
+            data_q = data_q.eq("reason", reason)
+        if min_score is not None:
+            data_q = data_q.gte("score", min_score)
+        if max_score is not None:
+            data_q = data_q.lte("score", max_score)
+        if sort == "skipped_at_desc":
+            data_q = data_q.order("skipped_at", desc=True)
+        else:
+            data_q = data_q.order("score", desc=True)  # score_desc — highest score first (closest to threshold)
+        data_q = data_q.range(offset, offset + limit - 1)
+        data_res = data_q.execute()
+        rows = data_res.data or []
+
+        # Enrich with entity name/type via a batched lookup
+        entity_ids = [r["entity_id"] for r in rows if r.get("entity_id")]
+        entity_map: dict[str, dict] = {}
+        if entity_ids:
+            ent_res = (
+                db()
+                .table("entities")
+                .select("id, name, entity_type")
+                .in_("id", entity_ids)
+                .execute()
+            )
+            for e in (ent_res.data or []):
+                entity_map[e["id"]] = e
+
+        result_rows = []
+        for r in rows:
+            eid = r.get("entity_id")
+            ent = entity_map.get(eid, {})
+            result_rows.append({
+                "entity_id": eid,
+                "name": ent.get("name"),
+                "entity_type": ent.get("entity_type"),
+                "reason": r.get("reason"),
+                "score": r.get("score"),
+                "evidence": r.get("evidence"),
+                "skipped_at": r.get("skipped_at"),
+            })
+
+        return {"rows": result_rows, "total": total, "limit": limit, "offset": offset}
+    except Exception as e:
+        log.warning("admin.api_skipped.error", error=str(e))
+        return {"rows": [], "total": 0, "limit": limit, "offset": offset}
+
+
+@router.post("/api/skipped/requeue")
+async def api_skipped_requeue(
+    body: RequeueBody,
+    _auth: None = Depends(_auth),
+) -> dict:
+    """Re-queue a single skipped entity or all entities with a given reason."""
+    from database.client import requeue_skipped
+
+    if not body.entity_id and not body.reason:
+        raise HTTPException(status_code=400, detail="Must provide entity_id or reason")
+
+    if body.entity_id:
+        types = requeue_skipped(body.entity_id)
+        log.info("admin.requeue_skipped.single", entity=body.entity_id, types=types)
+        return {"requeued": [body.entity_id], "types": types}
+
+    # Bulk by reason
+    res = (
+        db()
+        .table("enrichment_skip_log")
+        .select("entity_id")
+        .eq("reason", body.reason)
+        .is_("requeued_at", "null")
+        .limit(1000)
+        .execute()
+    )
+    entity_ids = [r["entity_id"] for r in (res.data or [])]
+    requeued = []
+    for eid in entity_ids:
+        try:
+            requeue_skipped(eid)
+            requeued.append(eid)
+        except Exception as e:
+            log.warning("admin.requeue_skipped.bulk_item_error", entity=eid, error=str(e))
+    log.info("admin.requeue_skipped.bulk", reason=body.reason, count=len(requeued))
+    return {"requeued": requeued, "count": len(requeued)}
+
+
+@router.get("/api/skipped/summary")
+async def api_skipped_summary(_auth: None = Depends(_auth)) -> dict:
+    """Return counts of currently-skipped entities grouped by reason."""
+    try:
+        res = (
+            db()
+            .table("enrichment_skip_log")
+            .select("reason")
+            .is_("requeued_at", "null")
+            .execute()
+        )
+        rows = res.data or []
+        by_reason: dict[str, int] = {}
+        for r in rows:
+            reason = r.get("reason") or "unknown"
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+        total = sum(by_reason.values())
+        return {"by_reason": by_reason, "total": total}
+    except Exception as e:
+        log.warning("admin.api_skipped_summary.error", error=str(e))
+        return {"by_reason": {}, "total": 0}
