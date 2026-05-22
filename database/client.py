@@ -92,29 +92,17 @@ def parse_bbl(bbl: str) -> tuple[str, str, str] | None:
     return boro, block, lot
 
 
-_LAWYER_RE = re.compile(
-    r"\b(esq\.?|attorney|atty\.?|law\s+(office|offices|firm|group))\b",
-    re.IGNORECASE,
-)
-
-
 def is_lawyer_name(name: str) -> bool:
-    """Heuristic: is this name an attorney rather than the real owner?
-    ACRIS deed parties often list the buyer's attorney alongside the buyer
-    (e.g. 'CRAIG D. ZIM, ESQ.'). We never want to enrich a lawyer because
-    they're not the landlord — they handled the closing.
-    """
-    if not name:
-        return False
-    return bool(_LAWYER_RE.search(name))
+    from enrichment.skip_filter import is_lawyer_name as _is_lawyer_name
+    return _is_lawyer_name(name)
 
 
-def _determine_enrichment_types(name: str, entity_type: str, extra: dict | None = None) -> list[str]:
-    """Return the enrichment_types applicable to this entity at creation time.
-    Empty list means no enrichment is needed (entity_status becomes 'done').
+def _compute_enrichment_types(name: str, entity_type: str, extra: dict | None = None) -> list[str]:
+    """Pure type-computation: return the enrichment_types applicable to this entity.
+
+    Does NOT consult the skip filter — callers decide that first.
 
     Rules:
-      - Lawyer-looking names (Esq, Attorney, Law Firm, ...) → no enrichment
       - LLC-shaped names that look building-specific → 'llc_pierce'
       - LLC / corporation / management_company with portfolio_size >= 3 → 'zoominfo'
       - individual / unknown / NULL entity_type → 'multi_source'
@@ -122,9 +110,6 @@ def _determine_enrichment_types(name: str, entity_type: str, extra: dict | None 
     Multiple types can apply to one entity (e.g. an LLC with 5 buildings gets
     both 'llc_pierce' and 'zoominfo').
     """
-    if is_lawyer_name(name):
-        return []
-
     types: list[str] = []
     extra = extra or {}
     portfolio_size = extra.get("portfolio_size", 0) or 0
@@ -140,6 +125,51 @@ def _determine_enrichment_types(name: str, entity_type: str, extra: dict | None 
         types.append("multi_source")
 
     return types
+
+
+def _determine_enrichment_types(name: str, entity_type: str, extra: dict | None = None) -> list[str]:
+    """Evaluate skip filter first; if passing, delegate to _compute_enrichment_types.
+
+    Returns [] when the skip filter matches (caller writes skip log) or when
+    no enrichment work applies.
+    """
+    from enrichment.skip_filter import evaluate as _sf_evaluate
+
+    entity_dict = {
+        "name": name,
+        "entity_type": entity_type,
+        "portfolio_size": (extra or {}).get("portfolio_size"),
+        "is_building_llc": is_building_llc(name),
+    }
+    decision = _sf_evaluate(entity_dict, properties=None)
+    if decision is not None:
+        return []
+    return _compute_enrichment_types(name, entity_type, extra)
+
+
+@supabase_retry()
+def _write_skip_log(entity_id: str, reason: str, score: float, evidence: str):
+    """Upsert a row into enrichment_skip_log. Safe to call multiple times
+    (upsert on primary key — entity_id is the PK)."""
+    db().table("enrichment_skip_log").upsert({
+        "entity_id": entity_id,
+        "reason": reason,
+        "score": score,
+        "evidence": evidence,
+    }, on_conflict="entity_id").execute()
+
+
+@supabase_retry()
+def _has_suppress_skip(entity_id: str) -> bool:
+    """Return True if an existing skip log row has suppress_future_skip=TRUE."""
+    res = db().table("enrichment_skip_log")\
+        .select("suppress_future_skip")\
+        .eq("entity_id", entity_id)\
+        .limit(1)\
+        .execute()
+    if not res.data:
+        return False
+    return bool(res.data[0].get("suppress_future_skip"))
 
 
 def is_building_llc(name: str) -> bool:
@@ -238,12 +268,16 @@ def upsert_entity(name: str, entity_type: str, extra: dict = None) -> str:
     """
     Find or create an entity. Returns the UUID.
     Uses normalized name for deduplication.
+
+    For new entities: runs the skip filter. On a skip, writes enrichment_skip_log
+    and sets enrichment_status='skipped' instead of queuing enrichment work.
     """
+    from enrichment.skip_filter import evaluate as _sf_evaluate
+
     norm = normalize_name(name)
     existing = find_entity_by_name(name)
     if existing:
         entity_id = existing["id"]
-        # Update fields if we have new info
         if extra:
             db().table("entities").update(extra).eq("id", entity_id).execute()
         return entity_id
@@ -258,11 +292,25 @@ def upsert_entity(name: str, entity_type: str, extra: dict = None) -> str:
     res = db().table("entities").insert(payload).execute()
     entity_id = res.data[0]["id"]
 
-    types = _determine_enrichment_types(name, entity_type, extra)
+    entity_dict = {
+        "name": name,
+        "entity_type": entity_type,
+        "portfolio_size": (extra or {}).get("portfolio_size"),
+        "is_building_llc": is_building_llc(name),
+    }
+    decision = _sf_evaluate(entity_dict, properties=None)
+
+    if decision is not None:
+        _write_skip_log(entity_id, decision.reason, decision.score, decision.evidence)
+        update_entity(entity_id, {"enrichment_status": "skipped"})
+        log.info("entity.created.skipped", entity=name, entity_type=entity_type,
+                 id=entity_id, reason=decision.reason, score=decision.score)
+        return entity_id
+
+    types = _compute_enrichment_types(name, entity_type, extra)
     if types:
         for t in types:
             queue_for_enrichment(entity_id, enrichment_type=t)
-        # leave enrichment_status='pending' (default)
     else:
         update_entity(entity_id, {"enrichment_status": "done"})
     log.info("entity.created", entity=name, entity_type=entity_type, id=entity_id, queue_types=types)
@@ -349,6 +397,79 @@ def queue_for_enrichment(entity_id: str, enrichment_type: str, priority: int = 5
         "enrichment_type": enrichment_type,
         "priority": priority,
     }, on_conflict="entity_id,enrichment_type").execute()
+
+
+def requeue_skipped(entity_id: str) -> list[str]:
+    """Re-queue a previously skipped entity for enrichment.
+
+    Sets suppress_future_skip=TRUE on the skip log row so the filter will not
+    re-skip this entity on subsequent evaluation. Sets enrichment_status='pending'
+    and queues the appropriate enrichment types (recomputed fresh from entity state).
+
+    Returns the list of queued types, or [] if the entity was not found.
+    """
+    ent_res = db().table("entities").select("*").eq("id", entity_id).limit(1).execute()
+    if not ent_res.data:
+        log.warning("requeue_skipped.entity_not_found", entity=entity_id)
+        return []
+    ent = ent_res.data[0]
+
+    types = _compute_enrichment_types(ent["name"], ent.get("entity_type"), ent)
+    for t in types:
+        queue_for_enrichment(entity_id, enrichment_type=t)
+
+    update_entity(entity_id, {"enrichment_status": "pending"})
+    db().table("enrichment_skip_log").update({
+        "requeued_at": "now()",
+        "suppress_future_skip": True,
+    }).eq("entity_id", entity_id).execute()
+
+    log.info("requeue_skipped.done", entity=ent["name"], entity_id=entity_id, types=types)
+    return types
+
+
+def reevaluate_for_skip(entity_id: str, properties: list[dict], has_owned_by_parents: bool = False) -> bool:
+    """Re-run the skip filter on an existing entity with fresh property context.
+
+    Called by llc_piercer after a successful pierce to evaluate newly-discovered
+    owner entities in context (the parent LLC's properties provide signals for
+    the low_value_score rule).
+
+    Respects suppress_future_skip=TRUE: if a previous skip was manually overridden,
+    this function does nothing and returns False.
+
+    Returns True if the entity was (re-)skipped.
+    """
+    from enrichment.skip_filter import evaluate as _sf_evaluate
+
+    if _has_suppress_skip(entity_id):
+        return False
+
+    ent_res = db().table("entities").select("*").eq("id", entity_id).limit(1).execute()
+    if not ent_res.data:
+        return False
+    ent = ent_res.data[0]
+
+    if ent.get("is_building_llc"):
+        return False
+
+    entity_dict = {
+        "name": ent.get("name", ""),
+        "entity_type": ent.get("entity_type"),
+        "portfolio_size": ent.get("portfolio_size"),
+        "is_building_llc": ent.get("is_building_llc", False),
+        "has_owned_by_parents": has_owned_by_parents,
+    }
+    decision = _sf_evaluate(entity_dict, properties=properties)
+    if decision is None:
+        return False
+
+    _write_skip_log(entity_id, decision.reason, decision.score, decision.evidence)
+    update_entity(entity_id, {"enrichment_status": "skipped"})
+    db().table("enrichment_queue").delete().eq("entity_id", entity_id).execute()
+    log.info("reevaluate_for_skip.skipped", entity=ent.get("name"), entity_id=entity_id,
+             reason=decision.reason, score=decision.score)
+    return True
 
 
 @supabase_retry()
