@@ -34,7 +34,7 @@ from admin.allowlist import is_entity_allowed_by_zip
 from config import config
 from database.client import (
     db, parse_bbl, upsert_entity, upsert_contact, upsert_relationship,
-    already_seen, mark_seen,
+    already_seen, mark_seen, is_building_llc, queue_for_enrichment,
 )
 from database.retry import retry_external
 
@@ -239,35 +239,49 @@ def _extraction_windows(pages: list[bytes]) -> list[tuple[list[bytes], float]]:
 SIGNER_EXTRACTION_PROMPT = """
 You are analyzing an ACRIS (NYC property records) mortgage document PDF.
 
-Your task: Find the name(s) of real individuals who signed this document on behalf of an LLC.
+Your task: Identify each signer of this mortgage document. A signer is either an individual (a real person) or an operating/management company representing the borrower LLC.
 
 Look specifically for:
 1. Signature blocks at the end of the document like:
    - "John Smith, as Managing Member of [LLC NAME]"
    - "By: Jane Doe, its Member/Manager"
    - "John Smith, individually and as Member of [LLC]"
+   - "By: V PROPERTIES, its Member/Manager"
    - Notary sections: "appeared before me, JOHN SMITH"
    - Personal guarantee sections listing a guarantor's name
 
 2. Borrower information at the top: if the borrower is an LLC, look for
    "a New York limited liability company, by JOHN SMITH, its managing member"
+   or "by V PROPERTIES, its Manager"
 
 For each signer found, return:
 {
   "signers": [
     {
       "full_name": "John Smith",
+      "extracted_entity_type": "individual",
       "role": "Managing Member",
       "llc_name": "123 MAIN STREET LLC",
       "section": "signature_block",
       "confidence": 0.95
+    },
+    {
+      "full_name": "V PROPERTIES",
+      "extracted_entity_type": "company",
+      "role": "Member/Manager",
+      "llc_name": "123 MAIN STREET LLC",
+      "section": "signature_block",
+      "confidence": 0.92
     }
   ],
   "llc_names": ["123 MAIN STREET LLC"]
 }
 
-If you cannot find any real person's name, return {"signers": [], "llc_names": []}.
-Only return names of real individuals, NOT corporate names or LLC names.
+Use "individual" for real persons and "company" for operating or management companies signing on behalf of the borrower LLC.
+
+Do NOT return the borrower LLC itself — that is the building's title-holding LLC named in the document title (e.g. '67 WOODHULL STREET LLC'). Only return entities that signed ON BEHALF OF the borrower.
+
+If you cannot find any signer, return {"signers": [], "llc_names": []}.
 Return valid JSON only.
 """
 
@@ -319,6 +333,51 @@ async def extract_signers_from_pdf(pdf_bytes: bytes, document_id: str) -> dict:
 # Step 4: Store results
 # ============================================================
 
+from typing import Literal
+
+
+def _classify_signer(
+    name: str,
+    extracted_entity_type: str,
+) -> tuple[Literal["individual", "company", "rejected"], str | None, str | None]:
+    """
+    Classify an extracted signer into routing buckets.
+
+    Returns (signer_kind, entity_type, rel_type):
+      - ("rejected", None, None)             — borrower LLC itself or too short
+      - ("individual", "individual", "owned_by")
+      - ("company", "management_company", "managed_by")
+      - ("company", "corporation", "operates_as")
+
+    Logic:
+      1. Reject if name is the borrower LLC (is_building_llc check).
+      2. Force "company" if extracted_entity_type == "company".
+      3. Force "company" if is_human_name() is False (corporate suffix present,
+         meaning Claude misclassified an LLC/corp as an individual).
+      4. Otherwise treat as individual.
+    """
+    from enrichment.skip_filter import is_human_name
+
+    if not name or len(name.strip()) < 3:
+        return ("rejected", None, None)
+
+    if is_building_llc(name):
+        return ("rejected", None, None)
+
+    # Determine if this should be routed as a company
+    is_company = (
+        extracted_entity_type == "company"
+        or not is_human_name(name)
+    )
+
+    if is_company:
+        if "MANAGEMENT" in name.upper():
+            return ("company", "management_company", "managed_by")
+        return ("company", "corporation", "operates_as")
+
+    return ("individual", "individual", "owned_by")
+
+
 async def process_pdf_signers(
     extracted: dict,
     llc_entity_id: str,
@@ -327,53 +386,90 @@ async def process_pdf_signers(
 ):
     """
     Store extracted signer information as entities + relationships.
-    A signer is an individual linked to the LLC as its real owner.
-    """
-    from enrichment.skip_filter import is_human_name
 
+    Individuals are stored with a 'signer' contact and an 'owned_by'
+    relationship to the building LLC.
+
+    Operating/management companies are stored as corporation or
+    management_company entities with an 'operates_as' or 'managed_by'
+    relationship, queued for zoominfo enrichment (no contact row —
+    zoominfo surfaces the people inside the org later).
+    """
     for signer in extracted.get("signers", []):
         full_name = signer.get("full_name", "").strip()
-        if not full_name or len(full_name) < 3:
-            continue
-        if not is_human_name(full_name):
-            log.warning("acris_pdf.signer_rejected_not_human",
-                        doc_id=document_id, llc=llc_name, extracted=full_name)
-            continue
+        extracted_entity_type = signer.get("extracted_entity_type", "individual")
         confidence = signer.get("confidence", 0.8)
         role = signer.get("role", "managing_member")
 
-        signer_entity_id = upsert_entity(full_name, "individual", extra={
-            "notes": f"Identified as signer on ACRIS doc {document_id} for {llc_name}",
-        })
+        signer_kind, entity_type, rel_type = _classify_signer(full_name, extracted_entity_type)
 
-        name_parts = full_name.rsplit(" ", 1)
-        first = name_parts[0] if len(name_parts) > 1 else full_name
-        last = name_parts[1] if len(name_parts) > 1 else ""
+        if signer_kind == "rejected":
+            if full_name and len(full_name) >= 3:
+                log.warning("acris_pdf.signer_rejected_borrower_llc",
+                            doc_id=document_id, llc=llc_name, entity=full_name)
+            continue
 
-        upsert_contact(signer_entity_id, {
-            "first_name": first,
-            "last_name": last,
-            "full_name": full_name,
-            "title": role,
-            "source": "acris_pdf",
-            "confidence": confidence,
-            "network_role": "signer",
-        })
+        if signer_kind == "individual":
+            signer_entity_id = upsert_entity(full_name, "individual", extra={
+                "notes": f"Identified as signer on ACRIS doc {document_id} for {llc_name}",
+            })
 
-        upsert_relationship(
-            child_entity_id=llc_entity_id,
-            parent_entity_id=signer_entity_id,
-            rel_type="owned_by",
-            source="acris_pdf",
-            confidence=confidence,
-            evidence=f"Signed ACRIS mortgage doc {document_id} as '{role}' of {llc_name}",
-        )
+            name_parts = full_name.rsplit(" ", 1)
+            first = name_parts[0] if len(name_parts) > 1 else full_name
+            last = name_parts[1] if len(name_parts) > 1 else ""
 
-        log.info("acris_pdf.signer_stored",
-                 signer=full_name,
-                 role=role,
-                 llc=llc_name,
-                 confidence=confidence)
+            upsert_contact(signer_entity_id, {
+                "first_name": first,
+                "last_name": last,
+                "full_name": full_name,
+                "title": role,
+                "source": "acris_pdf",
+                "confidence": confidence,
+                "network_role": "signer",
+            })
+
+            upsert_relationship(
+                child_entity_id=llc_entity_id,
+                parent_entity_id=signer_entity_id,
+                rel_type="owned_by",
+                source="acris_pdf",
+                confidence=confidence,
+                evidence=f"Signed ACRIS mortgage doc {document_id} as '{role}' of {llc_name}",
+            )
+
+            log.info("acris_pdf.signer_stored",
+                     entity=full_name,
+                     role=role,
+                     llc=llc_name,
+                     confidence=confidence)
+
+        else:  # signer_kind == "company"
+            role_category = "management" if entity_type == "management_company" else "owner_operating"
+
+            corp_entity_id = upsert_entity(full_name, entity_type, extra={
+                "notes": f"Operating/management co on ACRIS doc {document_id} for {llc_name}",
+                "role_category": role_category,
+            })
+
+            upsert_relationship(
+                child_entity_id=llc_entity_id,
+                parent_entity_id=corp_entity_id,
+                rel_type=rel_type,
+                source="acris_pdf",
+                confidence=confidence,
+                evidence=f"Signed ACRIS mortgage doc {document_id} as '{role}' of {llc_name}",
+            )
+
+            # Bypass portfolio_size gate — PDF-extracted operating cos always warrant enrichment
+            queue_for_enrichment(corp_entity_id, "zoominfo")
+
+            log.info("acris_pdf.operating_company_stored",
+                     entity=full_name,
+                     entity_type=entity_type,
+                     rel_type=rel_type,
+                     role=role,
+                     llc=llc_name,
+                     confidence=confidence)
 
 
 # ============================================================
