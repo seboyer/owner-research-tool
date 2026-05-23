@@ -193,6 +193,37 @@ def enrich_contacts(signer_id: str, limit: int, force: bool):
                    f"{stats['contacts_added']} contacts, {stats['companies_added']} companies added")
 
 
+@cli.command("enrich-company")
+@click.option("--entity-id", default=None, help="Entity UUID of a single company to enrich")
+@click.option("--entity-name", default=None, help="Entity name (resolved via find_entity_by_name)")
+@click.option("--force", is_flag=True, help="Re-run even if cached within STALE_DAYS")
+def enrich_company_cmd(entity_id: str, entity_name: str, force: bool):
+    """Run the company enrichment cascade on a single entity.
+
+    Bypasses the enrichment_queue + allowed_enrichment_queue view, so this
+    works on entities that have no property_role yet (useful for testing a
+    known mgmt company directly by name). Pass --entity-id OR --entity-name.
+    """
+    from enrichment.company.orchestrator import enrich_company
+
+    if not (entity_id or entity_name):
+        click.echo("ERROR: pass --entity-id or --entity-name")
+        return
+
+    if entity_name and not entity_id:
+        from database.client import find_entity_by_name
+        ent = find_entity_by_name(entity_name)
+        if not ent:
+            click.echo(f"Entity not found: {entity_name}")
+            click.echo("Hint: create it first with `upsert_entity(name, 'management_company')`")
+            return
+        entity_id = ent["id"]
+        click.echo(f"Resolved {entity_name} → {entity_id}")
+
+    stats = enrich_company(entity_id, force=force)
+    click.echo(str(stats))
+
+
 @cli.command("schedule")
 def schedule():
     """Start the persistent background scheduler (for production use)."""
