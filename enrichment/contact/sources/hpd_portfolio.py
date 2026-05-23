@@ -37,8 +37,25 @@ _CORP_SUFFIX_RE = re.compile(
     re.I,
 )
 
-# HPD contact types we care about for corporate enrichment
-_TARGET_TYPES = ("HeadOfficer", "Officer", "IndividualOwner", "CorporateOwner")
+# HPD contact types we care about for corporate enrichment.
+# Includes Agent/ManagingAgent because management companies are filed in HPD
+# as Agents — that's the entire point of HPD's Agent type. Excluding them
+# would silently miss every management company whose buildings register them
+# as the managing agent (which is the standard pattern).
+_TARGET_TYPES = (
+    "HeadOfficer", "Officer", "IndividualOwner", "CorporateOwner",
+    "Agent", "ManagingAgent",
+)
+
+# Per-HPD-type → (network_role, role_category) — mirrors hpd_building_contacts.
+_ROLE_MAP = {
+    "HeadOfficer":     ("head_officer",     "owner"),
+    "Officer":         ("co_officer",       "owner"),
+    "IndividualOwner": ("co_owner",         "owner"),
+    "CorporateOwner":  ("co_owner",         "owner"),
+    "Agent":           ("registered_agent", "management"),
+    "ManagingAgent":   ("registered_agent", "management"),
+}
 
 
 def _headers() -> dict:
@@ -48,15 +65,33 @@ def _headers() -> dict:
     return h
 
 
+def _bare(name: str) -> str:
+    """Uppercase + strip punctuation + collapse whitespace, but keep all words.
+
+    "Yak Management LLC" → "YAK MANAGEMENT LLC"
+    """
+    n = re.sub(r"[^A-Z0-9 ]", " ", name.upper())
+    return re.sub(r"\s+", " ", n).strip()
+
+
 def _normalize_company(name: str) -> str:
     """Strip common legal suffixes, uppercase, collapse whitespace.
 
     "STONEHENGE PARTNERS LLC" → "STONEHENGE PARTNERS"
+
+    Fallback: if stripping suffixes leaves the distinctive core too short
+    (< 4 chars — e.g. "Yak Management" → "YAK"), return the bare uppercased
+    form instead so the HPD LIKE query still has enough to match.
     """
-    n = _CORP_SUFFIX_RE.sub("", name)
-    n = re.sub(r"[^A-Z0-9 ]", " ", n.upper())
-    n = re.sub(r"\s+", " ", n).strip()
-    return n
+    stripped = _CORP_SUFFIX_RE.sub("", name)
+    stripped = re.sub(r"[^A-Z0-9 ]", " ", stripped.upper())
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+
+    if len(stripped) >= 4:
+        return stripped
+    # Suffix-strip ate too much (short-prefix mgmt cos like "Yak Management"
+    # or "RY Realty"). Fall back to the full uppercased form.
+    return _bare(name)
 
 
 def _is_distinctive(normalized: str) -> bool:
@@ -142,6 +177,9 @@ async def head_officers_for_company(company_name: str) -> list[ContactHit]:
         count = len(reg_ids)
         confidence = min(0.95, 0.5 + 0.1 * count)
         type_code = person_type.get((fn, ln), "HeadOfficer")
+        network_role, role_category = _ROLE_MAP.get(
+            type_code, ("head_officer", "owner")
+        )
         full_name = f"{fn.title()} {ln.title()}".strip()
         out.append(ContactHit(
             full_name=full_name,
@@ -149,8 +187,8 @@ async def head_officers_for_company(company_name: str) -> list[ContactHit]:
             last_name=ln.title() or None,
             title=type_code,
             company_name=company_name,
-            network_role="head_officer",
-            role_category="owner",
+            network_role=network_role,
+            role_category=role_category,
             confidence=confidence,
             source="hpd_portfolio",
             source_url=HPD_CONTACTS_URL,
