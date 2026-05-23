@@ -87,7 +87,9 @@ class Config:
     ACRIS_BATCH_SIZE: int = int(os.getenv("ACRIS_BATCH_SIZE", "500"))
     ENRICHMENT_BATCH_SIZE: int = int(os.getenv("ENRICHMENT_BATCH_SIZE", "50"))
     ACRIS_LOOKBACK_DAYS: int = int(os.getenv("ACRIS_LOOKBACK_DAYS", "30"))
-    ZOOMINFO_MIN_PORTFOLIO_SIZE: int = int(os.getenv("ZOOMINFO_MIN_PORTFOLIO_SIZE", "3"))
+    # ZOOMINFO_MIN_PORTFOLIO_SIZE removed — the company_enrich cascade
+    # queues all LLC/corp/mgmt entities regardless of portfolio size.
+    # Spend is governed by cost tier (FREE for 1-building entities).
 
     # ------------------------------------------------------------------
     # Auto-search worker toggle
@@ -115,7 +117,10 @@ class Config:
     DAILY_ENRICHMENT_COST_CAP_USD: float = float(os.getenv("DAILY_ENRICHMENT_COST_CAP_USD", "0"))
     COST_PER_ENTITY_LLC_PIERCE: float = float(os.getenv("COST_PER_ENTITY_LLC_PIERCE", "0.30"))
     COST_PER_ENTITY_ACRIS_PDF: float = float(os.getenv("COST_PER_ENTITY_ACRIS_PDF", "0.30"))
-    COST_PER_ENTITY_ZOOMINFO: float = float(os.getenv("COST_PER_ENTITY_ZOOMINFO", "1.50"))
+    # Company cascade can burn up to ~$5 at PREMIUM tier (50+ buildings):
+    # Apollo org_search ($0.01) + 3× Apollo people enrich ($3.00) + Zoominfo ($1.50)
+    # + Hunter ($0.25) + Google Places ($0.10) + 3× Proxycurl ($0.30).
+    COST_PER_ENTITY_COMPANY_ENRICH: float = float(os.getenv("COST_PER_ENTITY_COMPANY_ENRICH", "5.00"))
     COST_PER_ENTITY_MULTI_SOURCE: float = float(os.getenv("COST_PER_ENTITY_MULTI_SOURCE", "1.00"))
 
     # ------------------------------------------------------------------

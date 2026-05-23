@@ -11,7 +11,7 @@ Stage order and rationale:
   4. LLC Piercing        (ongoing)  — find real owners of building LLCs
      4a. ACRIS PDF Signers           — mortgage doc signature extraction
      4b. AI Agentic Reasoning        — Claude web research
-  5. Zoominfo Enrich     (ongoing)  — contact enrichment for corporate entities
+  5. Company Enrich     (ongoing)  — multi-source cascade for corporate entities
   6. Multi-Source Enrich (ongoing)  — Whitepages/PropertyRadar/Web for individuals
 """
 
@@ -70,12 +70,12 @@ async def stage_acris_pdf_pierce(batch_size: int = 15):
     log.info("pipeline.stage_done", stage="acris_pdf_pierce")
 
 
-async def stage_zoominfo_enrich(batch_size: int = None):
-    """Zoominfo enrichment — run daily (respects ENRICHMENT_BATCH_SIZE from config)."""
-    from enrichment.zoominfo import run_batch
-    log.info("pipeline.stage_start", stage="zoominfo_enrich")
+async def stage_company_enrich(batch_size: int = None):
+    """Company enrichment cascade — run daily (FREE→BUDGET→STANDARD→PREMIUM waterfall)."""
+    from enrichment.company.orchestrator import run_batch
+    log.info("pipeline.stage_start", stage="company_enrich")
     await run_batch(batch_size=batch_size)
-    log.info("pipeline.stage_done", stage="zoominfo_enrich")
+    log.info("pipeline.stage_done", stage="company_enrich")
 
 
 async def stage_multi_source_enrich(batch_size: int = 100):
@@ -99,7 +99,7 @@ STAGE_TIMEOUTS: dict[str, int] = {
     "wow_portfolio":        2 * 3600,
     "llc_piercing":         2 * 3600,
     "acris_pdf_pierce":     2 * 3600,   # Claude vision is slow
-    "zoominfo_enrich":      1 * 3600,
+    "company_enrich":       1 * 3600,
     "multi_source_enrich":  2 * 3600,
 }
 
@@ -127,7 +127,7 @@ async def _run_stage_with_timeout(stage_name: str, stage_fn: Callable) -> None:
 COST_PER_ENTITY: dict[str, float] = {
     "llc_pierce":          config.COST_PER_ENTITY_LLC_PIERCE,
     "acris_pdf_pierce":    config.COST_PER_ENTITY_ACRIS_PDF,
-    "zoominfo_enrich":     config.COST_PER_ENTITY_ZOOMINFO,
+    "company_enrich":      config.COST_PER_ENTITY_COMPANY_ENRICH,
     "multi_source_enrich": config.COST_PER_ENTITY_MULTI_SOURCE,
 }
 
@@ -203,8 +203,8 @@ async def run_initial_full_load():
         ("wow_portfolio",      stage_wow_portfolio),
         ("llc_piercing",       lambda: stage_llc_piercing(batch_size=50)),
         ("acris_pdf_pierce",   lambda: stage_acris_pdf_pierce(batch_size=30)),
-        ("zoominfo_enrich",    lambda: stage_zoominfo_enrich()),
-        ("multi_source_enrich",lambda: stage_multi_source_enrich(batch_size=200)),
+        ("company_enrich",      lambda: stage_company_enrich()),
+        ("multi_source_enrich", lambda: stage_multi_source_enrich(batch_size=200)),
     ]
 
     for stage_name, stage_fn in stages:
@@ -238,8 +238,8 @@ async def run_daily_pipeline(reset_tracker: bool = True):
         ("acris_delta",        stage_acris_delta),
         ("llc_piercing",       lambda: stage_llc_piercing(batch_size=15)),
         ("acris_pdf_pierce",   lambda: stage_acris_pdf_pierce(batch_size=10)),
-        ("zoominfo_enrich",    lambda: stage_zoominfo_enrich()),
-        ("multi_source_enrich",lambda: stage_multi_source_enrich(batch_size=50)),
+        ("company_enrich",      lambda: stage_company_enrich()),
+        ("multi_source_enrich", lambda: stage_multi_source_enrich(batch_size=50)),
     ]
 
     for stage_name, stage_fn in stages:
@@ -289,8 +289,8 @@ async def run_enrichment_only():
     stages = [
         ("llc_piercing",       lambda: stage_llc_piercing(batch_size=25)),
         ("acris_pdf_pierce",   lambda: stage_acris_pdf_pierce(batch_size=20)),
-        ("zoominfo_enrich",    lambda: stage_zoominfo_enrich()),
-        ("multi_source_enrich",lambda: stage_multi_source_enrich(batch_size=100)),
+        ("company_enrich",      lambda: stage_company_enrich()),
+        ("multi_source_enrich", lambda: stage_multi_source_enrich(batch_size=100)),
     ]
     for stage_name, stage_fn in stages:
         try:
@@ -338,7 +338,7 @@ async def print_stats():
 
     # Queue breakdown by type
     print("\n  Enrichment queue (by type):")
-    for t in ("llc_pierce", "zoominfo", "multi_source"):
+    for t in ("llc_pierce", "company_enrich", "multi_source"):
         c = db().table("enrichment_queue")\
             .select("id", count="exact")\
             .eq("enrichment_type", t)\

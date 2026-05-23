@@ -199,7 +199,7 @@ ADMIN_HTML = """<!DOCTYPE html>
 <div class="banner">
   <div class="banner-item">Auto-search: <strong id="auto-label">—</strong></div>
   <div class="banner-item">Queue — llc_pierce: <strong id="q-llc">—</strong></div>
-  <div class="banner-item">zoominfo: <strong id="q-zoo">—</strong></div>
+  <div class="banner-item">company_enrich: <strong id="q-co">—</strong></div>
   <div class="banner-item">multi_source: <strong id="q-ms">—</strong></div>
   <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
     <button class="btn" onclick="loadStatus()">Refresh status</button>
@@ -384,7 +384,7 @@ async function loadStatus() {
     }
     const q = d.queue || {};
     document.getElementById('q-llc').textContent = q.llc_pierce ?? '—';
-    document.getElementById('q-zoo').textContent  = q.zoominfo   ?? '—';
+    document.getElementById('q-co').textContent   = q.company_enrich ?? '—';
     document.getElementById('q-ms').textContent   = q.multi_source ?? '—';
   } catch(e) {
     console.error('status error', e);

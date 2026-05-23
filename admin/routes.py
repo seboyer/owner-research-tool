@@ -87,7 +87,7 @@ async def api_status(_auth: None = Depends(_auth)) -> dict:
     from database.client import get_scheduler_status
 
     queue_counts: dict[str, int] = {}
-    for etype in ("llc_pierce", "zoominfo", "multi_source"):
+    for etype in ("llc_pierce", "company_enrich", "multi_source"):
         res = (
             db()
             .table("enrichment_queue")
