@@ -460,8 +460,8 @@ async def process_pdf_signers(
                 evidence=f"Signed ACRIS mortgage doc {document_id} as '{role}' of {llc_name}",
             )
 
-            # Bypass portfolio_size gate — PDF-extracted operating cos always warrant enrichment
-            queue_for_enrichment(corp_entity_id, "zoominfo")
+            # Queue for company cascade enrichment (covers all tiers FREE→PREMIUM)
+            queue_for_enrichment(corp_entity_id, "company_enrich")
 
             log.info("acris_pdf.operating_company_stored",
                      entity=full_name,

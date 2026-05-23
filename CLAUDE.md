@@ -27,12 +27,14 @@ cp .env.example .env  # then fill in API keys
 # 3. database/migrations/003_reconcile_and_queue.sql
 # 4. database/migrations/004_drop_opencorporates_url.sql
 # 5. database/migrations/005_zipcode_allowlist.sql
+# ... (006–015 in order)
+# 16. database/migrations/016_company_enrichment.sql
 
 # CLI (main entry point)
 python main.py full-load          # one-time initial load (hours)
 python main.py daily              # ACRIS delta + enrichment
 python main.py weekly             # HPD refresh + WoW sync + daily pipeline
-python main.py enrich             # enrichment only (Zoominfo + multi-source + LLC piercing)
+python main.py enrich             # enrichment only (company cascade + multi-source + LLC piercing)
 python main.py enrich-contacts    # 3-prong contact enrichment for all pending signers
 python main.py enrich-contacts --signer-id <uuid>  # single signer
 python main.py enrich-contacts --force              # ignore 90-day cache
@@ -75,7 +77,7 @@ entity_relationships + contacts → CRM export views
 | Mode | Stages | Schedule |
 |------|--------|----------|
 | `full-load` | All stages, large batch sizes | One-time |
-| `daily` | ACRIS delta, LLC piercing, ACRIS PDFs, Zoominfo, multi-source | Daily 3 AM ET |
+| `daily` | ACRIS delta, LLC piercing, ACRIS PDFs, company cascade, multi-source | Daily 3 AM ET |
 | `weekly` | HPD full sync + WoW portfolio + daily stages | Sunday 2 AM ET |
 
 ### LLC Piercing — 3-Strategy Cascade (`enrichment/llc_piercer.py`)
@@ -132,6 +134,19 @@ Key broker-facing DB objects:
 - `contacts.seed_signer_id` — traces every contact back to its seed
 - `broker_pitch_list` view — one row per property with owner co, mgmt co, and signer contact in one query
 - `contact_enrichment_runs` — caches per-prong results for 90 days to avoid repeat spend
+- `company_enrichment_runs` — caches company cascade results for 90 days
+
+### Company Enrichment Cascade (`enrichment/company/`)
+
+Replaces the Zoominfo-only corporate path with a FREE→BUDGET→STANDARD→PREMIUM waterfall keyed on LLC/corporation/management_company entities. Queue type: `'company_enrich'` (renamed from `'zoominfo'` in migration 016). No portfolio_size gate — the cost tier governs spend (FREE for 1-building entities, PREMIUM for 50+).
+
+Cascade steps: (1) HPD cross-portfolio aggregation, (2) HPD per-BBL contacts, (3) Claude company web search, (4) Google Places [BUDGET], (5) Hunter domain email [BUDGET], (6) Apollo org→people [STANDARD], (7) Zoominfo [PREMIUM, requires `ZOOMINFO_CLIENT_ID`], (8) Proxycurl LinkedIn [PREMIUM].
+
+New sources in `enrichment/contact/sources/`: `hpd_portfolio.py`, `apollo_org.py`, `claude_company_research.py`.
+
+**Apollo two-step flow**: Apollo deprecated `/v1/mixed_people/search` for API callers in 2026 (returns 422). The replacement `/v1/mixed_people/api_search` returns discovery rows only — masked surnames (`"Mo***s"`), no email/phone, only `has_email` / `has_direct_phone` boolean flags. To get actual contact data, `apollo_org.py:apollo_person_enrich_by_id` calls `/v1/people/match` with `{"id": <apollo_id>}` per person (~$1/credit). The cascade enriches the top 3 candidates with `has_email=true` per company. Phone reveal requires an async webhook callback (not implemented) — phones come from Hunter / BatchData / HPD instead.
+
+Run `scripts/eval_apollo_org.py` (free, discovery-only) to validate Apollo org-match quality; add `--enrich=N` to spend ~$N per company verifying real email retrieval. `enrichment/zoominfo.py` retains `enrich_entity_with_zoominfo` and `search_contacts_at_company` — `run_batch` was deleted (moved to the cascade orchestrator).
 
 ### Signer Loading (`enrichment/contact/orchestrator.py`)
 
@@ -149,13 +164,13 @@ Wraps Supabase with project-specific helpers:
 - **`seen_records` table**: idempotent ingestor guard — prevents reprocessing identical source records
 - All writes use upsert-on-conflict for idempotency
 - `parse_bbl(bbl)` — decomposes a 10-digit BBL into `(boro, block, lot)` with leading zeros stripped (Socrata API expects unpadded values). Use this everywhere instead of inline `bbl[1:6]` / `str(int(...))` patterns.
-- `_determine_enrichment_types(name, entity_type, extra)` — decides which work items to queue at `upsert_entity` time. Returns a subset of `{'llc_pierce', 'zoominfo', 'multi_source'}`.
+- `_determine_enrichment_types(name, entity_type, extra)` — decides which work items to queue at `upsert_entity` time. Returns a subset of `{'llc_pierce', 'company_enrich', 'multi_source'}`.
 - `queue_for_enrichment(entity_id, enrichment_type)` / `get_enrichment_batch(enrichment_type, limit)` / `mark_enrichment_done(entity_id, type)` / `mark_enrichment_failed(entity_id, type, error)` — the per-type queue API. Each enrichment stage drains its own type.
 - `load_dotenv(override=True)` in `config.py` — required so `.env` values override any shell environment variables (e.g. an empty `ANTHROPIC_API_KEY` in the shell)
 
 ### Enrichment Queue (`enrichment_queue` table)
 
-One row per `(entity_id, enrichment_type)`. Each batch processor (`llc_piercer`, `zoominfo`, `multi_source`) pulls its own type, flips `entities.enrichment_status` to `'in_progress'` on first pickup, then calls `mark_enrichment_done` / `mark_enrichment_failed` per work item. Entity status is only promoted to `'done'` when no queue rows remain. After 3 failed attempts on a queue row, the row is dropped and (if no other rows remain) the entity flips to `'failed'` with the error appended to `notes`.
+One row per `(entity_id, enrichment_type)`. Each batch processor (`llc_piercer`, `company_enrich`, `multi_source`) pulls its own type, flips `entities.enrichment_status` to `'in_progress'` on first pickup, then calls `mark_enrichment_done` / `mark_enrichment_failed` per work item. Entity status is only promoted to `'done'` when no queue rows remain. After 3 failed attempts on a queue row, the row is dropped and (if no other rows remain) the entity flips to `'failed'` with the error appended to `notes`.
 
 ### Retry Policy (`database/retry.py`)
 
@@ -163,7 +178,7 @@ External HTTP calls are wrapped with `@retry_external(max_attempts=N)` from `dat
 
 ### Key Database Objects (`database/schema.sql`)
 
-Core tables: `properties` (BBL-keyed, includes `house_number` + `street_name` as structured fields), `entities` (unified LLC/corp/individual), `entity_relationships` (child→parent with confidence), `property_roles` (property↔entity with role+source), `contacts`, `seen_records`, `enrichment_queue`, `ingestion_log`, `contact_enrichment_runs`
+Core tables: `properties` (BBL-keyed, includes `house_number` + `street_name` as structured fields), `entities` (unified LLC/corp/individual), `entity_relationships` (child→parent with confidence), `property_roles` (property↔entity with role+source), `contacts`, `seen_records`, `enrichment_queue`, `ingestion_log`, `contact_enrichment_runs`, `company_enrichment_runs`
 
 Key views: `broker_pitch_list` (property + owner co + mgmt co + signer in one row). Earlier views (`landlord_profiles`, `unpierced_llcs`, `crm_export`) were dropped in migration 003 — they were unused.
 
@@ -172,7 +187,7 @@ Key views: `broker_pitch_list` (property + owner co + mgmt co + signer in one ro
 - **Free/public**: NYC OpenData (HPD, ACRIS, PLUTO, DOB permits via Socrata)
 - **Budget (~$0.40–$1/signer)**: BatchData V3 skip trace (~$0.40/match), Hunter.io, Google Places
 - **Standard (~$1–$3/signer)**: Apollo.io (person match, key in `X-Api-Key` header), Whitepages (50-query trial, $220/mo — last-resort, efficacy TBD)
-- **Premium (~$5–$20/signer)**: Proxycurl (LinkedIn), Zoominfo (JWT auth, `search_contacts_at_company` in `enrichment/zoominfo.py`)
+- **Premium (~$5–$20/signer)**: Proxycurl (LinkedIn), Zoominfo (JWT auth, `enrich_entity_with_zoominfo` / `search_contacts_at_company` in `enrichment/zoominfo.py` — called from the company cascade at PREMIUM tier and from prong1 respectively)
 - **Not active**: Who Owns What (API dead — returns HTML), PropertyRadar (code kept, key not set)
 - **AI**: Anthropic Claude Sonnet (`claude-sonnet-4-5`) for web search enrichment; Claude Opus for ACRIS PDF vision extraction. 90s inter-signer sleep required to avoid Sonnet rate limits.
 - **ACRIS PDFs**: Playwright local → Browserless (cloud) → ScraperAPI (proxy) fallback chain
@@ -189,7 +204,7 @@ End-to-end cost per address at STANDARD tier (BatchData + Apollo + Claude Sonnet
 All settings loaded from environment variables. Key tunables:
 - `HPD_BATCH_SIZE`, `ACRIS_BATCH_SIZE`, `ENRICHMENT_BATCH_SIZE`
 - `ACRIS_LOOKBACK_DAYS` (default: 30)
-- `ZOOMINFO_MIN_PORTFOLIO_SIZE` (skip small portfolios)
+- `COST_PER_ENTITY_COMPANY_ENRICH` (budget cap signal, default $5.00 — covers PREMIUM-tier worst case of Apollo enrich × 3 + Zoominfo + Hunter + Proxycurl × 3; actual cost tracked per-run in `company_enrichment_runs.cost_cents`)
 - `ENVIRONMENT` (development/production)
 - `ADMIN_PASSWORD` — HTTP Basic Auth password for `/admin`. Required to access admin dashboard; returns 500 if unset.
 

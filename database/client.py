@@ -104,22 +104,21 @@ def _compute_enrichment_types(name: str, entity_type: str, extra: dict | None = 
 
     Rules:
       - LLC-shaped names that look building-specific → 'llc_pierce'
-      - LLC / corporation / management_company with portfolio_size >= 3 → 'zoominfo'
+      - LLC / corporation / management_company → 'company_enrich'
+        (no portfolio_size threshold; cost tier inside the cascade governs spend)
       - individual / unknown / NULL entity_type → 'multi_source'
 
-    Multiple types can apply to one entity (e.g. an LLC with 5 buildings gets
-    both 'llc_pierce' and 'zoominfo').
+    Multiple types can apply to one entity (e.g. an LLC gets both
+    'llc_pierce' and 'company_enrich').
     """
     types: list[str] = []
     extra = extra or {}
-    portfolio_size = extra.get("portfolio_size", 0) or 0
 
     if is_building_llc(name):
         types.append("llc_pierce")
 
-    if entity_type in ("llc", "corporation", "management_company") \
-       and portfolio_size >= config.ZOOMINFO_MIN_PORTFOLIO_SIZE:
-        types.append("zoominfo")
+    if entity_type in ("llc", "corporation", "management_company"):
+        types.append("company_enrich")
 
     if entity_type in ("individual", "unknown") or not entity_type:
         types.append("multi_source")

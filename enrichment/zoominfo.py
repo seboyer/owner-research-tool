@@ -15,13 +15,12 @@ Zoominfo API auth:
   Docs: https://api-docs.zoominfo.com/#authentication
 
 We use credits sparingly:
-  - Only enrich entities with portfolio_size >= ZOOMINFO_MIN_PORTFOLIO_SIZE
+  - Called from enrichment/company/cascade.py at PREMIUM tier
   - Cache results in Supabase (don't re-query for 30 days)
 """
 
 import json
 import time
-import asyncio
 from typing import Optional
 
 import httpx
@@ -31,8 +30,6 @@ import structlog
 from config import config
 from database.client import (
     db, upsert_contact, update_entity,
-    start_ingestion_log, finish_ingestion_log,
-    get_enrichment_batch, mark_enrichment_done, mark_enrichment_failed,
 )
 from database.retry import retry_external
 
@@ -341,86 +338,7 @@ async def search_contacts_at_company(full_name: str, company: str) -> list:
     return out
 
 
-# ============================================================
-# Batch Runner
-# ============================================================
-
-async def run_batch(batch_size: int = None):
-    """
-    Drain the zoominfo enrichment queue, respecting the per-run cost cap.
-    """
-    from pipeline.orchestrator import get_cost_tracker, COST_PER_ENTITY
-
-    batch_size = batch_size or config.ENRICHMENT_BATCH_SIZE
-    log_id = start_ingestion_log("zoominfo_enrichment")
-    stats = {
-        "records_fetched": 0,
-        "records_created": 0,
-        "records_skipped": 0,
-        "records_no_match": 0,
-        "cost_estimated_usd": 0.0,
-        "stopped_by_cost_cap": False,
-    }
-    tracker = get_cost_tracker()
-    per_entity_cost = COST_PER_ENTITY["zoominfo_enrich"]
-
-    try:
-        batch_num = 0
-        while True:
-            if tracker.cap_hit:
-                stats["stopped_by_cost_cap"] = True
-                log.info("zoominfo.cost_cap_hit",
-                         spent=tracker.total_spent, cap=tracker.cap_usd)
-                break
-
-            batch_num += 1
-            queue_rows = get_enrichment_batch(enrichment_type="zoominfo", limit=batch_size)
-            if not queue_rows:
-                break
-            stats["records_fetched"] += len(queue_rows)
-            log.info("zoominfo.batch_iter", batch=batch_num, count=len(queue_rows))
-
-            for row in queue_rows:
-                entity = row.get("entities") or {}
-                if not entity or not entity.get("id"):
-                    continue
-                entity_id = entity["id"]
-                entity_name = entity["name"]
-
-                try:
-                    # First job to pick up this entity flips 'pending' -> 'in_progress'.
-                    if entity.get("enrichment_status") == "pending":
-                        update_entity(entity_id, {"enrichment_status": "in_progress"})
-                    success = await enrich_entity_with_zoominfo(entity_id, entity_name)
-                    mark_enrichment_done(entity_id, "zoominfo")
-                    tracker.add("zoominfo_enrich", per_entity_cost)
-                    if success:
-                        stats["records_created"] += 1
-                    else:
-                        stats["records_no_match"] += 1
-                except Exception as e:
-                    err = f"{type(e).__name__}: {e}"
-                    log.error("zoominfo.entity_error", entity=entity_name, error=err)
-                    mark_enrichment_failed(entity_id, "zoominfo", err)
-
-                if tracker.cap_hit:
-                    stats["stopped_by_cost_cap"] = True
-                    log.info("zoominfo.cost_cap_hit_mid_batch",
-                             spent=tracker.total_spent, cap=tracker.cap_usd)
-                    break
-
-                # Zoominfo rate limit: be conservative
-                await asyncio.sleep(1.5)
-
-            if tracker.cap_hit:
-                break
-
-        stats["cost_estimated_usd"] = round(tracker.stage_spent("zoominfo_enrich"), 2)
-        finish_ingestion_log(log_id, stats)
-        log.info("zoominfo.batch_complete", **stats, batches=batch_num)
-
-    except Exception as e:
-        stats["cost_estimated_usd"] = round(tracker.stage_spent("zoominfo_enrich"), 2)
-        finish_ingestion_log(log_id, stats, status="failed", error=str(e))
-        log.error("zoominfo.batch_error", error=str(e))
-        raise
+# run_batch removed — queue draining for corporate entities moved to
+# enrichment/company/orchestrator.py:run_batch (queue type: 'company_enrich').
+# This module retains enrich_entity_with_zoominfo and search_contacts_at_company,
+# which are called from the cascade at PREMIUM tier and from prong1 respectively.
