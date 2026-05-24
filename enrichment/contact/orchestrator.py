@@ -259,6 +259,14 @@ def _persist_prong_result(signer: Signer, r: ProngResult):
                 confidence=co.confidence,
                 evidence=co.evidence,
             )
+            if rel_type == "operates_as":
+                _write_employs_edges_for_llc(
+                    operating_co_id=entity_id,
+                    building_llc_id=signer.building_llc_id,
+                    source=co.source,
+                    confidence=co.confidence,
+                    evidence=co.evidence,
+                )
 
     # --- Contacts → contacts table ----------------------------
     for ct in r.contacts:
@@ -362,3 +370,45 @@ def _company_role_for_contact(ct: ContactHit) -> str:
     if ct.role_category == "owner":      return "owner_operating"
     if ct.role_category == "management": return "management"
     return "other"
+
+
+def _write_employs_edges_for_llc(
+    operating_co_id: str,
+    building_llc_id: str,
+    source: str,
+    confidence: float,
+    evidence: str | None,
+) -> None:
+    """Write 'employs' edges from `operating_co_id` to every individual
+    person who has an 'owned_by' relationship to `building_llc_id`.
+
+    Called from _persist_prong_result whenever an operates_as edge is
+    written, so the implicit 'this company employs this signer' fact
+    becomes explicit. Matches the backfill SQL in migration 020.
+    """
+    rels = (
+        db().table("entity_relationships")
+        .select("parent_entity_id, entities!entity_relationships_parent_entity_id_fkey(id, entity_type)")
+        .eq("child_entity_id", building_llc_id)
+        .eq("relationship_type", "owned_by")
+        .execute()
+    )
+    for row in rels.data or []:
+        owner = row.get("entities") or {}
+        if owner.get("entity_type") != "individual":
+            continue
+        person_id = owner.get("id")
+        if not person_id or person_id == operating_co_id:
+            continue
+        try:
+            upsert_relationship(
+                child_entity_id=person_id,
+                parent_entity_id=operating_co_id,
+                rel_type="employs",
+                source=source,
+                confidence=confidence,
+                evidence=evidence or "Individual signer of LLC operated by this company",
+            )
+        except Exception as e:
+            log.warning("contact.employs_write_failed",
+                        op_co=operating_co_id, person=person_id, error=str(e))
