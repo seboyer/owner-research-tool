@@ -37,6 +37,7 @@ from database.client import (
     already_seen, mark_seen, is_building_llc, queue_for_enrichment,
 )
 from database.retry import retry_external
+from enrichment.contact.filters import is_govt_entity
 
 log = structlog.get_logger(__name__)
 
@@ -395,6 +396,13 @@ async def process_pdf_signers(
     relationship, queued for zoominfo enrichment (no contact row —
     zoominfo surfaces the people inside the org later).
     """
+    # If the LLC itself is a government entity (HUD-owned property, City of NY
+    # tax lien, etc.) skip the whole document — none of its signers belong in
+    # the sales pipeline and creating contacts for them pollutes the view.
+    if is_govt_entity(llc_name):
+        log.info("acris_pdf.skipping_govt_llc", doc_id=document_id, llc=llc_name)
+        return
+
     for signer in extracted.get("signers", []):
         full_name = signer.get("full_name", "").strip()
         extracted_entity_type = signer.get("extracted_entity_type", "individual")
@@ -407,6 +415,11 @@ async def process_pdf_signers(
             if full_name and len(full_name) >= 3:
                 log.warning("acris_pdf.signer_rejected_borrower_llc",
                             doc_id=document_id, llc=llc_name, entity=full_name)
+            continue
+
+        if is_govt_entity(full_name):
+            log.info("acris_pdf.signer_rejected_govt", doc_id=document_id,
+                     llc=llc_name, entity=full_name)
             continue
 
         if signer_kind == "individual":

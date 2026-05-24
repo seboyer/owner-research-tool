@@ -41,13 +41,28 @@ _GOVT_PATTERNS: list[str] = [
     r"NEW\s+YORK\s+STATE",
     r"UNITED\s+STATES\s+OF\s+AMERICA",
     r"U\.S\.\s+DEPARTMENT",
-    r"\bHUD\b",
+    r"(?:^|\s)HUD\b",            # bare "HUD" — avoid HUDSON, EMMA-HUD false positives
+    r"SECRETARY\s+OF\s+HOUSING",
+    r"SECY\s+OF\s+HOUSING",      # ACRIS abbreviation
+    r"HOUSING\s+AND\s+URBAN\s+DEV",
+    r"SECRETARY\s+OF\s+(?:THE\s+)?TREASURY",
+    r"INTERNAL\s+REVENUE",
+    r"\bIRS\b",
+    r"DEPARTMENT\s+OF\s+JUSTICE",
+    r"\bDOJ\b",
+    r"\bFBI\b",
+    r"DEPARTMENT\s+OF\s+VETERANS",
+    r"SOCIAL\s+SECURITY\s+ADMIN",
     r"FEDERAL\s+DEPOSIT",
     r"FEDERAL\s+NATIONAL",
     r"\bFANNIE\s+MAE\b",
     r"\bFREDDIE\s+MAC\b",
     r"\bFDIC\b",
 ]
+
+# Government email TLDs. .gov is restricted to US government use (IANA policy);
+# .mil is restricted to US military.  Both are unambiguous signals.
+_GOVT_EMAIL_RE = re.compile(r"@[^@\s]+\.(gov|mil)\b", re.IGNORECASE)
 
 _COMPILED = re.compile(
     "|".join(f"(?:{p})" for p in _GOVT_PATTERNS),
@@ -63,7 +78,18 @@ def is_govt_entity(name: str) -> bool:
       - "COMMISSIONER OF FINANCE", "COMMISSOINER OF FINANCE", "COMM OF FINANCE"
       - "NYC HPD", "N.Y.C.", "NYCHA"
       - "FINANCE ADMINISTRATION", "FINANCE ADMIN"
+      - "THE SECRETARY OF HOUSING AND URBAN DEVELOPMENT"
     """
     if not name:
         return False
     return bool(_COMPILED.search(name))
+
+
+def is_govt_email(email: str) -> bool:
+    """
+    Return True if the email is on a US government / military domain
+    (.gov or .mil — both IANA-restricted to government use).
+    """
+    if not email:
+        return False
+    return bool(_GOVT_EMAIL_RE.search(email))
