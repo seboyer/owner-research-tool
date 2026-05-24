@@ -192,6 +192,7 @@ async def strategy_wow_portfolio(entity: dict) -> bool:
             "full_name": name,
             "source": "hpd",
             "confidence": 0.80,
+            "seed_building_llc_id": entity_id,
         })
 
         upsert_relationship(
@@ -429,6 +430,7 @@ async def _process_agentic_result(result: dict, entity_id: str, entity_name: str
                 "title": owner.get("title", ""),
                 "source": "ai_research",
                 "confidence": confidence,
+                "seed_building_llc_id": entity_id,
             })
 
         upsert_relationship(

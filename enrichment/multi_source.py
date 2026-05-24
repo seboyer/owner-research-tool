@@ -230,11 +230,17 @@ async def enrich_via_whitepages(
             emails = person.get("emails") or []
 
             phone = None
+            phone_type = None
             if phones:
                 p0 = phones[0]
-                num = p0.get("number") or ""
-                ptype = p0.get("type") or ""
-                phone = f"{ptype} {num}".strip() if ptype else num
+                phone = p0.get("number") or None
+                raw_type = p0.get("type") or ""
+                if raw_type == "mobile":
+                    phone_type = "mobile"
+                elif "landline" in raw_type or "voip" in raw_type:
+                    phone_type = "office"
+                elif raw_type:
+                    phone_type = raw_type
             email = None
             if emails:
                 e0 = emails[0]
@@ -246,6 +252,7 @@ async def enrich_via_whitepages(
             upsert_contact(entity_id, {
                 "full_name": person.get("name") or full_name,
                 "phone": phone,
+                "phone_type": phone_type,
                 "email": email,
                 "source": "whitepages",
                 "confidence": 0.80,
@@ -319,6 +326,15 @@ async def enrich_via_apollo(
             email = person.get("email")
             phones = person.get("phone_numbers") or []
             phone = phones[0].get("sanitized_number") if phones else None
+            phone_type_raw = phones[0].get("type") if phones else None
+            if phone_type_raw in ("mobile", "home"):
+                phone_type = "mobile"
+            elif phone_type_raw == "work_direct":
+                phone_type = "direct"
+            elif phone_type_raw == "work_hq":
+                phone_type = "hq"
+            else:
+                phone_type = None
 
             if not (email or phone):
                 return SourceResult(status=SourceStatus.OK_NO_DATA)
@@ -330,6 +346,7 @@ async def enrich_via_apollo(
                 "full_name": person.get("name") or full_name,
                 "email": email,
                 "phone": phone,
+                "phone_type": phone_type,
                 "source": "apollo",
                 "confidence": 0.85,
                 "raw_data": person,
@@ -406,6 +423,7 @@ async def enrich_via_batchdata(entity_id: str, entity_name: str) -> SourceResult
         "full_name": hit.full_name or entity_name,
         "email": hit.email,
         "phone": hit.phone,
+        "phone_type": "mobile",
         "source": "batchdata_skip_trace",
         "confidence": hit.confidence,
         "raw_data": hit.raw,
@@ -466,7 +484,17 @@ async def enrich_via_propertyradar(
             prop = properties[0]
             owner = prop.get("owner", {})
 
-            phone = owner.get("phone") or owner.get("mobilePhone")
+            raw_office_phone = owner.get("phone")
+            raw_mobile_phone = owner.get("mobilePhone")
+            if raw_office_phone:
+                phone = raw_office_phone
+                phone_type = "office"
+            elif raw_mobile_phone:
+                phone = raw_mobile_phone
+                phone_type = "mobile"
+            else:
+                phone = None
+                phone_type = None
             email = owner.get("email")
             full_name = owner.get("fullName") or entity_name
 
@@ -477,6 +505,7 @@ async def enrich_via_propertyradar(
                     "last_name": name_parts[1] if len(name_parts) > 1 else "",
                     "full_name": full_name,
                     "phone": phone,
+                    "phone_type": phone_type,
                     "email": email,
                     "source": "propertyradar",
                     "confidence": 0.85,
@@ -569,6 +598,7 @@ async def enrich_via_google_places(
                 upsert_contact(entity_id, {
                     "full_name": entity_name,
                     "phone": phone,
+                    "phone_type": "office",
                     "source": "google_places",
                     "confidence": 0.75,
                     "raw_data": {"website": website, "google_place_id": place_id},
@@ -736,6 +766,7 @@ async def enrich_via_proxycurl(
                     "full_name": full_name,
                     "email": email,
                     "phone": phone,
+                    "phone_type": "mobile",
                     "linkedin_url": linkedin_url,
                     "source": "proxycurl",
                     "confidence": 0.85,

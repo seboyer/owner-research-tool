@@ -426,6 +426,7 @@ async def process_pdf_signers(
                 "source": "acris_pdf",
                 "confidence": confidence,
                 "network_role": "signer",
+                "seed_building_llc_id": llc_entity_id,
             })
 
             upsert_relationship(
