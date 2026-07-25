@@ -135,6 +135,26 @@ class Config:
     AIRTABLE_HPD_FIELD_ID: str = os.getenv("AIRTABLE_HPD_FIELD_ID", "fldqyrQmuJlglgXqu")
 
     # ------------------------------------------------------------------
+    # Airtable CRM sync (pipeline/airtable_sync.py)
+    # Pushes researched Managements / Contacts / Addresses into the same
+    # LL Pipeline base the address webhook above writes back to.
+    # ------------------------------------------------------------------
+    AIRTABLE_MANAGEMENT_TABLE_ID: str = os.getenv(
+        "AIRTABLE_MANAGEMENT_TABLE_ID", "tblXSLY5l2ON0sChK"
+    )
+    AIRTABLE_CONTACTS_TABLE_ID: str = os.getenv(
+        "AIRTABLE_CONTACTS_TABLE_ID", "tblid0IpZKpI6O14q"
+    )
+    # Record in the Types table that tags a Management as ORT-sourced.
+    AIRTABLE_ORT_TYPE_RECORD_ID: str = os.getenv(
+        "AIRTABLE_ORT_TYPE_RECORD_ID", "recpeksnQCHm0qlRd"
+    )
+    # Pipeline stage stamped on Managements this tool creates.
+    AIRTABLE_NEW_PIPELINE_STAGE: str = os.getenv(
+        "AIRTABLE_NEW_PIPELINE_STAGE", "New/Unsorted"
+    )
+
+    # ------------------------------------------------------------------
     # NYC OpenData Socrata endpoints
     # ------------------------------------------------------------------
     HPD_REGISTRATIONS_URL = "https://data.cityofnewyork.us/resource/tesw-yqqr.json"
