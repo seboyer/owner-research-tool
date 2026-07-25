@@ -235,7 +235,7 @@ Writes are **additive only**. Records the tool did not create never get a field 
 - `filters.is_govt_entity()` spells the misspellings `COMM(?:ISSIONER|ISSONER|ISSOINER)?` — every alternative double-S — so it returns `False` for `COMMISIONER OF FINANCE`, the single-S form ACRIS actually records. The same gap exists in the SQL `is_govt_name()` from migration 022.
 - `skip_filter._BANK_RE` uses `\bSAVINGS\b` / `\bBANK\b`, which miss `GREEN POINT SAVINGSBANK`, `AMERICAN BROKERS CONDUIT` and `CARVER FEDL SAVS & LOAN ASSN` — all real "owners" on ACRIS foreclosure deeds.
 
-A Zapier zap writes these same three tables from the `zapier_enriched_contacts` view (migrations 018–022), i.e. two implementations of one job. **Only one should run at a time.** `docs/CRM_DEDUPLICATION.md` compares them; `docs/RECONCILIATION_PLAN.md` covers the unmerged contact-boundary line and what still needs deciding.
+A Zapier zap writes these same three tables from the `zapier_enriched_contacts` view (migrations 018–022), i.e. two implementations of one job. It uses a New Row trigger, so it does not re-create records this sync has already written; the overlap applies to newly enriched contacts going forward, and choosing one path is still open. `docs/CRM_DEDUPLICATION.md` compares them. **`docs/RECONCILIATION_PLAN.md` is the handoff document** — read it before merging, renumbering or applying any migration; it covers the unmerged contact-boundary line and the conflicting migration numbers.
 
 ## Deployment
 

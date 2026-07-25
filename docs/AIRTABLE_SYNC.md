@@ -10,8 +10,11 @@ Pushes Owner Research Tool results into the **LL Pipeline** Airtable base
 Implementation: `pipeline/airtable_sync.py`. Safe to re-run — a second run
 over unchanged data writes zero records.
 
-A Zapier zap writes these same three tables from a SQL query against the
-same Postgres. Only one of the two should run at a time — see
+A Zapier zap writes these same three tables from the
+`zapier_enriched_contacts` view over the same Postgres — two
+implementations of one job. It fires only on rows it has not seen before,
+so it does not re-create what this sync has already written; the overlap
+applies to newly enriched contacts going forward. See
 `docs/CRM_DEDUPLICATION.md` for the comparison and the open decision.
 
 This is the *outbound* half of the Airtable integration. The inbound half

@@ -27,19 +27,24 @@ The reseed is complete and verified. Current base contents:
 1850 records written. A follow-up `--dry-run` reports zero creates, zero
 updates and zero merges — a true fixed point, so re-running is safe.
 
-### Open risk: two writers, one target
+### Two writers, one target — but no retroactive duplication
 
 The zap ingests a SQL query against the same Postgres database the sync
 reads. These are not complementary pipelines — they are two
 implementations of one job, pointed at the same three tables.
 
-**If the zap is live, it may duplicate everything the reseed just wrote.**
-Whether it does depends entirely on what its match step is keyed on. If it
-matches on raw `phone`, it will not find the records the sync created: the
-sync normalizes to `7183022171`, and a record stored as `(718) 302-2171`
-does not match it as a string in either direction.
+**There is no retroactive duplication risk.** An earlier draft of this
+document warned that the zap might re-create the 1850 reseeded records. It
+will not: the zap uses a *New Row* trigger on `zapier_enriched_contacts`
+keyed on `id`, and it has already passed every row the reseed covered.
+Those are the same rows it originally pushed to Airtable, which were later
+polluted by an unrelated tool and cleared. **The zap did not cause the
+pollution**, and it only fires on rows it has not seen before. It runs from
+a daily cron, when enabled.
 
-Until the two are reconciled, only one of them should be running.
+**The overlap is forward-looking only.** For contacts enriched *from now
+on*, both the zap and the sync would create Airtable records. That is the
+open Zapier-vs-cron decision in §7, not an outstanding incident.
 
 ---
 
@@ -443,13 +448,13 @@ Build §6 first.
   Reconciling these is a prerequisite for merging anything — including
   `pipeline/airtable_sync.py`, which adds no migration of its own but sits
   on top of the divergent tree.
-- **What is the zap's Airtable-side match step keyed on?** The `New Row`
-  trigger only dedups source rows (§3b). This determines whether the zap
-  will duplicate the 1850 reseeded records.
+- **What is the zap's Airtable-side match step keyed on?** Not a
+  duplication risk for the reseeded records (§1), but it still decides how
+  the zap dedups *new* rows against the base — which is what the eight
+  rules in §2 govern. Not visible in this repo.
 - The SQL in §3 has not been executed against the database.
 - Migrations 017/018 *of this line* are unapplied, so neither path can
   filter on `contacts.status = 'published'` — the quality gate stands in
   for it.
-- `_EXTRA_GOVT_RE` in `pipeline/airtable_sync.py` is redundant against
-  `main` and should be dropped on rebase; `_EXTRA_BANK_RE` should be kept
-  (§3b).
+- `_EXTRA_GOVT_RE` / `_EXTRA_BANK_RE` in `pipeline/airtable_sync.py` each
+  cover a verified upstream gap and must stay until fixed at source (§3b).

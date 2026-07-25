@@ -1,261 +1,280 @@
-# Reconciliation plan — this working copy vs GitHub `main`
+# HANDOFF — Airtable CRM sync & repo reconciliation
 
-Drafted July 2026, after the Airtable reseed. This working copy
-(`/home/sam/Dev/owner-research-tool`, unison-synced from the Mac) and
-`github.com/seboyer/owner-research-tool` `main` have diverged into two
-lines with conflicting migration numbers.
-
-Goal: get `pipeline/airtable_sync.py` onto `main` without dragging two
-months of unrelated divergence with it, and decide what happens to the
-rest.
+**Status: paused, waiting on a git sync fix.** Written July 2026 to be
+picked up by a fresh session once the repository situation is resolved.
+Assume the reader has no prior context.
 
 ---
 
-## 1. Evidence — which line is production
+## 1. Read this first
 
-The live Supabase database was probed directly for each line's artifacts.
+Work was **deliberately stopped** here. The blocker is not technical debt
+in the code — it is that this directory has no git repository, and the
+owner has significant work-in-progress on a local machine that must not be
+disturbed.
 
-| Artifact | Line | Present in live DB? |
+**Do not attempt to resolve the git situation by creating a repository
+here.** See §6.
+
+### What is already done
+
+**PR #44 is open and complete:**
+<https://github.com/seboyer/owner-research-tool/pull/44>
+— *Add Airtable CRM sync (Management / Contacts / Addresses)*,
+branch `airtable-crm-sync`, 1 commit, +2191/−1 across 8 files, cut from
+`main` and verified against `main`'s code.
+
+The Airtable base has already been reseeded using that code — 1850 records
+written, verified convergent. **That work is finished; do not redo it.**
+
+### The blocker
+
+- This directory (`/home/sam/Dev/owner-research-tool`) is unison-synced
+  from the owner's Mac. **Unison syncs files, not `.git`** — there is no
+  git checkout anywhere on this machine.
+- The owner has substantial WIP locally that has not been pushed.
+- Until the local repo and GitHub `main` are unified, any further branching
+  or merging risks clobbering that WIP.
+
+**Nothing in §5 should start until the owner confirms git is unified.**
+
+---
+
+## 2. Step 0 for the next session — establish ground truth
+
+Everything in this document was true when written. Verify before acting;
+do not trust it blind.
+
+```bash
+# 1. Is PR #44 merged, closed, or still open?
+#    (token: GITHUB_CLAUDE in /home/sam/Dev/1-Resources/master.env — works,
+#     authenticates as seboyer with push+admin)
+curl -s -H "Authorization: Bearer $TOKEN" \
+  https://api.github.com/repos/seboyer/owner-research-tool/pulls/44 \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["state"],d.get("merged"))'
+
+# 2. Has the divergence been resolved? Compare main against this tree.
+git clone https://github.com/seboyer/owner-research-tool.git /tmp/ort && \
+  diff -rq --exclude=.git --exclude=venv --exclude=__pycache__ \
+       --exclude=.ruff_cache --exclude=.claude --exclude='*.env' \
+       /tmp/ort /home/sam/Dev/owner-research-tool
+
+# 3. On the OWNER'S MAC, not here — is the WIP an unpushed branch?
+#    git status ; git branch -a ; git log --oneline origin/main..HEAD
+```
+
+### Environment gotchas
+
+- **`venv/` is a stale macOS virtualenv** — its symlinks point at
+  `/opt/homebrew/...` and it does not run on this Linux box. `python3-venv`
+  is not installed either. Install deps to a target dir instead:
+  `pip install --target <dir> supabase==2.29.0 'httpx>=0.28,<0.29' structlog click tenacity python-dotenv anthropic openai`
+  then run with `PYTHONPATH=<dir>`.
+- **Secrets** live in `/home/sam/Dev/1-Resources/master.env` (outside this
+  directory; Bash reaches it without `/add-dir`). `GITHUB_DIGITALOCEAN_DEPLOY_TOKEN`
+  is **expired (401)** — use `GITHUB_CLAUDE`.
+- `.env` here already has a working `AIRTABLE_API_KEY` (added this session
+  from `render.env`). `.gitignore` covers `.env`, so it will not be
+  committed.
+
+---
+
+## 3. Evidence already gathered — do not re-derive
+
+### The live database is on `main`'s line
+
+Probed directly against Supabase REST:
+
+| Artifact | Line | In live DB? |
 |---|---|---|
-| `zapier_enriched_contacts` view | `main` 018 | **yes** (HTTP 200) |
-| `company_enrichment_runs` table | `main` 016 | **yes** (HTTP 200) |
-| `enrichment_queue` rows typed `company_enrich` | `main` 016 rename | **yes — 5521 rows** |
-| `enrichment_queue` rows typed `zoominfo` | pre-016 | **zero** (rename ran) |
-| `contacts.status` column | here 017 | no (HTTP 400) |
-| `ranked_property_contacts` view | here 018 | no (HTTP 404) |
-| `contact_observations` table | here 017 | no (HTTP 404) |
-| `contact_scores` table | here 017 | no (HTTP 404) |
+| `zapier_enriched_contacts` view | `main` 018 | **yes** |
+| `company_enrichment_runs` table | `main` 016 | **yes** |
+| `enrichment_queue` rows typed `company_enrich` | `main` 016 rename | **yes — 5521** |
+| `enrichment_queue` rows typed `zoominfo` | pre-016 | **zero** |
+| `contacts.status` column | this tree, 017 | no (HTTP 400) |
+| `ranked_property_contacts` view | this tree, 018 | no (HTTP 404) |
+| `contact_observations` / `contact_scores` | this tree, 017 | no (HTTP 404) |
 
-**Verdict: `main` is production.** The contact-boundary line in this
-working copy (`016_enable_rls`, `017_contact_boundary`,
-`018_broker_surface_v2`, plus `identity.py`, `scoring.py`, `store.py`) has
-never been applied to the database and never been merged.
+**`main` is production.** The contact-boundary line in this working copy
+(`016_enable_rls`, `017_contact_boundary`, `018_broker_surface_v2`, plus
+`enrichment/contact/identity.py`, `scoring.py`, `store.py`, and the
+`score-contacts` CLI command) was **never applied and never merged**.
 
 `016_enable_rls` is the one item this probe cannot settle — RLS with no
-policies is invisible to a service-key client. Check it directly in
-Supabase before assuming either way.
+policies is invisible to a service-key client. Check in Supabase directly.
 
-### Likely cause
+### Conflicting migration numbers
 
-Unison syncs *files*, not `.git`. There is no git checkout on the Linux
-box at all. So the contact-boundary work is almost certainly sitting on the
-Mac as uncommitted changes or an unpushed local branch, and the file-level
-"divergence" seen from here is just that work, unpushed.
-
-**First thing to check, on the Mac:**
-
-```bash
-git status                  # uncommitted contact-boundary work?
-git branch -a               # an unpushed local branch?
-git log --oneline origin/main..HEAD
-```
-
-That single command set determines whether this is a real fork or simply
-unpushed work — and most of the rest of this plan gets simpler if it is the
-latter.
-
----
-
-## 2. The useful discovery: the sync is independent
-
-`pipeline/airtable_sync.py` has **no dependency on the undeployed line**.
-
-Its imports — `config`, `database.client.db`, `database.retry`,
-`enrichment.contact.filters.is_govt_entity`,
-`enrichment.skip_filter._BANK_RE / is_lawyer_name` — all exist on `main`.
-It references none of `contacts.status`, `ranked_property_contacts`,
-`contact_observations`, `contact_scores`, `identity.py`, `scoring.py` or
-`store.py`. It adds no migration. It queries only base tables
-(`contacts`, `entities`, `property_roles`, `properties`).
-
-**So it can ship to `main` on its own, ahead of any wider reconciliation.**
-That is Phase 1, and it is the only phase blocking the PR.
-
----
-
-## 3. Phase 1 — land the sync on `main` (small, clean PR)
-
-Branch from `main`, not from this working copy.
-
-### Files to add wholesale
-
-| File | Note |
-|---|---|
-| `pipeline/airtable_sync.py` | new, self-contained |
-| `docs/AIRTABLE_SYNC.md` | new |
-| `docs/CRM_DEDUPLICATION.md` | new |
-| `docs/RECONCILIATION_PLAN.md` | new (this file) |
-
-`docs/` does not exist on `main` at all, so all four land without conflict.
-
-### Files to hand-apply — do NOT copy from this working copy
-
-These four differ between the lines for unrelated reasons. Re-apply the
-*specific edits* onto `main`'s versions:
-
-| File | Edit | Conflict risk |
+| # | GitHub `main` | This working copy |
 |---|---|---|
-| `config.py` | add the `AIRTABLE_MANAGEMENT_TABLE_ID` / `CONTACTS_TABLE_ID` / `ORT_TYPE_RECORD_ID` / `NEW_PIPELINE_STAGE` block after `AIRTABLE_HPD_FIELD_ID` | **none** — the Airtable block is byte-identical on both lines |
-| `.env.example` | add the CRM-sync block after `AIRTABLE_HPD_FIELD_ID` | **none** — identical on both lines |
-| `main.py` | add the `sync-airtable` command + 2 usage docstring lines | **low** — but this copy has `score-contacts` (contact-boundary line) and `main` has `enrich-company`. Copying the file wholesale would delete `enrich-company` and smuggle in `score-contacts`. |
-| `CLAUDE.md` | add the sync section, commands, divergence note | **medium** — the two CLAUDE.md files describe different feature sets |
+| 016 | `company_enrichment` | `enable_rls` |
+| 017 | `company_enrich_indirect_view` | `contact_boundary` |
+| 018 | `zapier_enriched_contacts_view` | `broker_surface_v2` |
 
-### One code change required before merging
+`main` additionally has 019–022 (Zapier view refinements) that are absent
+here. **Same-numbered files are not the same migrations.**
 
-**Narrow `_EXTRA_GOVT_RE` — do not delete it.** An earlier draft of this
-plan said to drop it entirely because `main`'s `filters.py` covers those
-patterns. Tested against `main`'s actual code, that is only partly true:
+### Current Airtable state (LL Pipeline, `appstQVl7JeMfr7d0`)
 
-```
-main is_govt_entity('COMMISIONER OF FINANCE')                   -> False   <-- gap
-main is_govt_entity('SECY OF HOUSING & URBAN DVLPT')            -> True
-main is_govt_entity('THE SECRETARY OF HOUSING AND URBAN DEV..') -> True
-```
+| Table | Total | From the sync | Pre-existing, untouched |
+|---|---|---|---|
+| Management | 647 | 522 | 125 |
+| Contacts | 843 | 723 | 120 |
+| Addresses | 740 | 624 | 116 |
 
-`filters.py` spells the misspellings `COMM(?:ISSIONER|ISSONER|ISSOINER)?` —
-every alternative has a **double S**, so the single-S form ACRIS actually
-records is not matched. Deleting the local pattern would have silently
-readmitted Commissioner-of-Finance rows into the CRM.
+Post-run audit: no obfuscated emails, no orphaned links, **no contact
+linked to more than one Management**. One duplicate contact
+(`JOSEPH BRUNNER` / `Joseph Brunner`, from a since-fixed bug) was deleted;
+`recmVieqFQE7hID44` is the survivor.
 
-So `_EXTRA_GOVT_RE` is reduced to `COMMIS+ION(?:ER)?\s+OF\s+FIN` (the one
-real gap) and the redundant alternatives are dropped.
+### The zap is not a duplication risk
 
-**Keep `_EXTRA_BANK_RE` in full.** Verified against both lines:
-`skip_filter._BANK_RE` uses `\bSAVINGS\b` / `\bBANK\b`, which fail on
-`GREEN POINT SAVINGSBANK` (no word boundary in the run-together form),
-`AMERICAN BROKERS CONDUIT` and `CARVER FEDL SAVS & LOAN ASSN`.
+Confirmed by the owner: *New Row* trigger on `zapier_enriched_contacts`,
+runs from a daily cron when enabled. It has already passed every row the
+reseed covered — those are the rows it originally pushed, which were later
+polluted **by an unrelated tool** and cleared. The zap did not cause the
+pollution. Overlap with the sync is forward-looking only.
 
-**Better follow-up (separate PR):** fix both at source — widen the
-Commissioner alternation in `filters.py` to `COMMIS+ION…`, and add the
-run-together / ACRIS-abbreviation forms to `skip_filter._BANK_RE`. Then
-both local patches can go. Kept out of this PR to avoid changing enrichment
-behavior in a change that is otherwise additive.
+### Two verified upstream filter gaps
 
-### Verification before merge
+Both tested against `main`'s code, both patched locally in
+`pipeline/airtable_sync.py` so enrichment behavior is unchanged:
 
-```bash
-python main.py sync-airtable --dry-run
-```
-
-Must report **zero creates, zero updates, zero merges** against the current
-base. That is the convergence check, and it also proves the rebased
-imports resolve.
+- `filters.is_govt_entity()` spells the misspellings
+  `COMM(?:ISSIONER|ISSONER|ISSOINER)?` — every alternative **double-S** —
+  so `is_govt_entity('COMMISIONER OF FINANCE')` returns `False`. That
+  single-S form is what ACRIS actually records. **The SQL `is_govt_name()`
+  in migration 022 has the identical gap, so the zap is affected too.**
+- `skip_filter._BANK_RE` uses `\bSAVINGS\b` / `\bBANK\b`, missing
+  `GREEN POINT SAVINGSBANK` (no word boundary in the run-together form),
+  `AMERICAN BROKERS CONDUIT` and `CARVER FEDL SAVS & LOAN ASSN`.
 
 ---
 
-## 4. Phase 2 — triage the contact-boundary line
+## 4. Phase 1 — done, for reference
 
-Do this as a decision, not a merge. The work is: `016_enable_rls`,
-`017_contact_boundary`, `018_broker_surface_v2`, `enrichment/contact/`
-`identity.py` / `scoring.py` / `store.py`, plus edits to `orchestrator.py`,
-`models.py`, `filters.py`, and the `score-contacts` command.
+PR #44. Recorded here because *how* it was built matters for the phases
+that follow.
 
-It is a real feature — the candidate→publish boundary that scores contacts
-and publishes only what clears the bar (`docs/SPEC_contact_boundary.md`).
-It is also two months stale and never deployed.
+**Branch cut from `main`, not from this working copy.** Four new files
+(`pipeline/airtable_sync.py`, `docs/AIRTABLE_SYNC.md`,
+`docs/CRM_DEDUPLICATION.md`, this file) landed clean. Four shared files —
+`config.py`, `.env.example`, `main.py`, `CLAUDE.md` — had their edits
+**hand-applied to `main`'s versions**.
 
-Three honest options:
+That distinction is essential and applies to every future phase:
 
-**(a) Land it.** It is the designed fix for exactly the quality problem the
-sync's gate works around. If it ships, `load_units()` should filter on
-`status = 'published'` and most of the gate becomes redundant. Requires
-Phase 3.
+> This tree's `main.py` has `score-contacts` (undeployed contact-boundary
+> work); `main` has `enrich-company` (production). Copying either file
+> wholesale deletes the other side's feature.
 
-**(b) Shelve it deliberately.** Tag the branch, write down why, delete it
-from the working tree so the two lines stop drifting. Cheapest option; the
-risk is quietly losing real work.
-
-**(c) Cherry-pick `016_enable_rls` only.** RLS is a security control and is
-independent of the boundary feature. Worth landing on its own regardless of
-what happens to (a).
-
-**Recommendation: (c) now, then decide (a) vs (b) on its own merits.** Do
-not let a security migration stay blocked behind an unrelated feature.
+Verified before push: `--dry-run` from the branch reported **0 creates, 0
+updates, 0 writes** against the live base — identical to this tree, proving
+convergence holds with `main`'s filters; the 12-case filter test passed;
+`ruff` clean on the new file, with `config.py`/`main.py` errors confirmed
+pre-existing by stashing and re-running on untouched `main`.
 
 ---
 
-## 5. Phase 3 — if the contact-boundary line lands
+## 5. Phases 2–4 — blocked on the git fix
 
-### Renumber the collisions
+### Phase 2 — triage the contact-boundary line
 
-`main` already occupies 016–022. Renumber this line to sit after:
+Work involved: `016_enable_rls`, `017_contact_boundary`,
+`018_broker_surface_v2`, `enrichment/contact/{identity,scoring,store}.py`,
+edits to `orchestrator.py` / `models.py` / `filters.py`, and the
+`score-contacts` command. Spec: `docs/SPEC_contact_boundary.md`.
 
-| Current (here) | Becomes |
+It is the designed fix for exactly the data-quality problem the sync's
+quality gate works around — a candidate→publish boundary that scores
+contacts and publishes only what clears the bar. It is also stale and never
+deployed.
+
+Options: **(a)** land it; **(b)** shelve it deliberately, tagged and
+documented; **(c)** cherry-pick `016_enable_rls` alone.
+
+**Recommendation: (c) now, then decide (a) vs (b) separately.** RLS is a
+security control and should not stay blocked behind an unrelated feature.
+
+### Phase 3 — if the boundary line lands
+
+Renumber past `main`'s 016–022:
+
+| Current here | Becomes |
 |---|---|
 | `016_enable_rls.sql` | `023_enable_rls.sql` |
 | `017_contact_boundary.sql` | `024_contact_boundary.sql` |
 | `018_broker_surface_v2.sql` | `025_broker_surface_v2.sql` |
 
-Then update the ordered migration list in `CLAUDE.md`, and the reference in
-`docs/SPEC_contact_boundary.md` §7 and the `018` header comment (which
-tells you to run `scripts/backfill_contact_boundary.py` first — still true,
-just renumbered).
+Then update the migration list in `CLAUDE.md` and the references in
+`docs/SPEC_contact_boundary.md` §7 and the `018` header.
 
-Check `025_broker_surface_v2` against `main`'s views before applying: it
-replaces `broker_pitch_list`, while `main`'s Zapier work added
-`zapier_enriched_contacts`. They are separate objects, so no conflict is
-expected — but both read `contacts`, and `025` narrows the broker surface
-to `status = 'published'`. Anything downstream of `broker_pitch_list`
-will see fewer rows the moment it applies.
+- **Take `main`'s `filters.py`**, not this tree's — `main`'s is strictly
+  newer (government patterns *plus* `is_govt_email()`). Re-apply only
+  genuinely boundary-specific changes on top.
+- **Sequencing:** `018/025` must not be applied until
+  `scripts/backfill_contact_boundary.py` has scored every existing contact
+  row, or the broker surface empties out — nothing is `published` yet.
+- `025` narrows `broker_pitch_list` to `status = 'published'`; anything
+  downstream will see fewer rows the moment it applies.
 
-### Take `main`'s `filters.py`, not this copy's
-
-`main`'s version is strictly newer — it has the government patterns *and*
-`is_govt_email()`. This copy's is the older file. On rebase, keep `main`'s
-and re-apply only genuinely boundary-specific changes on top, if any.
-
-### Sequencing
-
-`018/025` must not be applied until
-`scripts/backfill_contact_boundary.py` has scored every existing contact
-row — otherwise the broker surface empties out, because nothing is
-`published` yet.
-
----
-
-## 6. Phase 4 — reconcile the duplicated concerns
-
-Once both lines are on one trunk, three things exist in two places:
+### Phase 4 — de-duplicate concerns across the two paths
 
 | Concern | On `main` | In the sync | Resolution |
 |---|---|---|---|
-| Government filter | `filters.py` + `is_govt_name()` in SQL (022) | `_EXTRA_GOVT_RE` | widen `COMMIS+ION…` in `filters.py` **and** in SQL `is_govt_name()`, then delete the patch |
-| Bank/lender filter | `skip_filter._BANK_RE` (has gaps) | `_EXTRA_BANK_RE` | fix `skip_filter.py`, then delete the patch |
-| Company name resolution | 4-tier COALESCE in the Zapier view (022) | `entities.name` | adopt the view's cascade in the sync |
+| Government filter | `filters.py` + SQL `is_govt_name()` (022) | `_EXTRA_GOVT_RE` | widen `COMMIS+ION…` in **both**, then delete the patch |
+| Bank/lender filter | `skip_filter._BANK_RE` | `_EXTRA_BANK_RE` | fix at source, then delete the patch |
+| Company name resolution | 4-tier COALESCE in the Zapier view (022) | `entities.name` | **port the cascade into the sync** |
 | Contact eligibility | `WHERE email/phone NOT NULL` in the view | the sync's quality gate | converge on `status='published'` if Phase 3 lands |
 
 The company-name cascade is the one worth porting deliberately: employer →
 LLC chain → owned LLC → direct entity is better than what the sync does
-today, and it is the difference between a Management named
-`WOODS, REGINALD R` and one named after the actual operating company.
+today. It is the difference between a Management named `WOODS, REGINALD R`
+and one named after the actual operating company.
 
 ---
 
-## 7. Do not do these
+## 6. Do not do these
 
 - **Do not `git init` in this working copy.** Unison would propagate `.git`
-  to the Mac, where a real repository already exists.
+  to the Mac, where a real repository and active WIP already exist. This is
+  the single most damaging thing available here.
 - **Do not copy `main.py`, `config.py`, `CLAUDE.md` or `.env.example`
-  wholesale** in either direction. Each carries feature work from its own
-  line; a wholesale copy silently deletes the other side's.
-- **Do not apply this copy's `016/017/018`** to the production database.
-  `main`'s 016–022 are already applied; same-numbered files are not the
-  same migrations.
-- **Do not run the zap and the cron simultaneously** against the same three
-  Airtable tables (see `docs/CRM_DEDUPLICATION.md` §1).
+  wholesale** in either direction (§4).
+- **Do not apply this tree's `016/017/018`** to the production database.
+  `main`'s 016–022 are already applied.
+- **Do not re-run the reseed** expecting changes. It is convergent; a run
+  now writes zero records. `--dry-run` first, always.
+- **Do not delete `_EXTRA_GOVT_RE` / `_EXTRA_BANK_RE`** from
+  `pipeline/airtable_sync.py` on the assumption that `main` covers them. An
+  earlier draft of this plan said exactly that and was wrong — see §3.
 
 ---
 
-## 8. Decisions needed
+## 7. Open decisions for the owner
 
-1. **Is the contact-boundary line an unpushed branch or abandoned work?**
-   Answered by `git status` / `git branch -a` on the Mac (§1).
-2. **Phase 2: land, shelve, or cherry-pick RLS only?**
-3. **A GitHub PAT** with `contents:write` + `pull_requests:write` on
-   `seboyer/owner-research-tool`. The existing
-   `GITHUB_DIGITALOCEAN_DEPLOY_TOKEN` in `1-Resources/master.env` returns
-   401 — expired, revoked, or not scoped to this repo.
-4. **Zapier or cron** for the CRM write path — independent of all of the
-   above, tracked in `docs/CRM_DEDUPLICATION.md` §7.
+1. **Resolve the git sync**, so the local WIP and `main` are one line.
+   Everything below is blocked on this.
+2. **Is the contact-boundary line an unpushed branch or abandoned work?**
+   Answered by `git status` / `git branch -a` on the Mac.
+3. **Phase 2:** land, shelve, or cherry-pick RLS only.
+4. **Merge PR #44** — independent of 2 and 3; it adds no migration and
+   depends only on modules already on `main`.
+5. **Zapier or cron** for the CRM write path — tracked separately in
+   `docs/CRM_DEDUPLICATION.md` §7. If cron, the audit log specced in §6 of
+   that document is a prerequisite.
 
-Phase 1 is unblocked by everything except #3.
+---
+
+## 8. Reference
+
+| Document | Covers |
+|---|---|
+| `docs/AIRTABLE_SYNC.md` | sync mechanics, field mapping, matching rules |
+| `docs/CRM_DEDUPLICATION.md` | the 8 dedup rules, Zapier vs cron, audit-log spec |
+| `docs/SPEC_contact_boundary.md` | the candidate→publish boundary (Phase 2) |
+| `CLAUDE.md` | conventions; the sync section records the three matching rules |
+
+**Note:** this file is also committed in PR #44 at an earlier revision.
+The copy in the working tree is authoritative — if the PR is still open,
+its copy should be refreshed from this one before merge.
