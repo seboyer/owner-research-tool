@@ -10,6 +10,8 @@ Usage:
   python main.py pierce --entity "123 BROADWAY LLC"  # Pierce a specific LLC
   python main.py pierce --address "123 Broadway, Brooklyn, NY 11201"  # Full pipeline for an address
   python main.py schedule           # Start the persistent scheduler
+  python main.py sync-airtable --dry-run  # Preview the Airtable CRM sync
+  python main.py sync-airtable      # Push results to the Airtable base
 
 Examples:
   python main.py full-load
@@ -248,6 +250,23 @@ def ingest(source: str):
 
     asyncio.run(_run())
     click.echo(f"Ingestor '{source}' complete.")
+
+
+@cli.command("sync-airtable")
+@click.option("--dry-run", is_flag=True, help="Report what would change; write nothing.")
+@click.option("--limit", type=int, default=None, help="Only sync the first N Management units.")
+def sync_airtable(dry_run: bool, limit: int):
+    """Push researched Managements / Contacts / Addresses to Airtable."""
+    from pipeline.airtable_sync import sync
+
+    if dry_run:
+        click.echo("DRY RUN — no records will be written.\n")
+
+    report = sync(dry_run=dry_run, limit=limit)
+    click.echo(report.render())
+
+    if dry_run:
+        click.echo("\nDRY RUN — nothing was written. Re-run without --dry-run to apply.")
 
 
 if __name__ == "__main__":

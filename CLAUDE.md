@@ -43,6 +43,8 @@ python main.py pierce --entity "123 BROADWAY LLC"  # pierce a specific LLC
 python main.py pierce --address "123 BROADWAY, MANHATTAN"  # research a full address
 python main.py ingest hpd|acris|wow           # individual ingestors
 python main.py schedule           # start persistent scheduler (production)
+python main.py sync-airtable --dry-run  # preview the Airtable CRM sync
+python main.py sync-airtable      # push Managements/Contacts/Addresses to Airtable
 
 # Targeted address test (runs full pipeline on specific addresses)
 python test_addresses.py
@@ -213,6 +215,27 @@ All enrichment API keys are optional — the system degrades gracefully when key
 ### Scheduler (`scheduler.py`)
 
 APScheduler-based persistent service. Runs as the production entry point in Docker/Railway. Coalesces missed runs (1-hour grace for daily, 2-hour for weekly).
+
+### Airtable CRM sync (`pipeline/airtable_sync.py`)
+
+Outbound counterpart to the `webhook.py` address feed — pushes researched entities into the LL Pipeline base as Management (primary) + Contacts + Addresses. Full design in `docs/AIRTABLE_SYNC.md`. Re-runnable: a second run over unchanged data writes zero records. Always `--dry-run` first after changing matching rules.
+
+Three rules exist because breaking them corrupts the CRM, and each is easy to reintroduce:
+
+- **A phone match is not a personal identity.** Everyone at a firm shares the switchboard, so matching a contact on phone alone merges distinct people into one record and loses the rest. Email is identity on its own; a phone match needs the names to agree too. A phone match is still fine for identifying the *Management*. For the same reason the email/phone indexes are **multi-valued** — a single-entry index hides everyone but the first person at a shared number, so the rest get re-created on every run.
+- **Two source entities never merge on a weak signal.** Matching a record already in the base is the point of the sync, but when the names disagree the match rests on a shared mobile number or consumer-ISP domain, which fuses unrelated landlords. Every surviving merge is printed in the run report.
+- **A weak cross-entity signal never outranks an entity's own Management record.** This is what makes the sync stable across runs: records created by run 1 stop looking "in-run" to run 2, so a guard written only against same-run merges silently lapses and every merge it prevented happens the second time.
+
+After any change to the matching rules, run the sync then `--dry-run` again — it must report zero creates, zero updates and no new merges, or the rules don't converge.
+
+Writes are **additive only**. Records the tool did not create never get a field overwritten, never have Pipeline touched, and never receive the ORT note / checkbox / Types link — they did not originate here.
+
+`_EXTRA_GOVT_RE` / `_EXTRA_BANK_RE` in that module patch two verified gaps in the shared filters. Both are narrowly scoped so enrichment behavior is unchanged, and both should be fixed upstream rather than widened here:
+
+- `filters.is_govt_entity()` spells the misspellings `COMM(?:ISSIONER|ISSONER|ISSOINER)?` — every alternative double-S — so it returns `False` for `COMMISIONER OF FINANCE`, the single-S form ACRIS actually records. The same gap exists in the SQL `is_govt_name()` from migration 022.
+- `skip_filter._BANK_RE` uses `\bSAVINGS\b` / `\bBANK\b`, which miss `GREEN POINT SAVINGSBANK`, `AMERICAN BROKERS CONDUIT` and `CARVER FEDL SAVS & LOAN ASSN` — all real "owners" on ACRIS foreclosure deeds.
+
+A Zapier zap writes these same three tables from the `zapier_enriched_contacts` view (migrations 018–022), i.e. two implementations of one job. It uses a New Row trigger, so it does not re-create records this sync has already written; the overlap applies to newly enriched contacts going forward, and choosing one path is still open. `docs/CRM_DEDUPLICATION.md` compares them. **`docs/RECONCILIATION_PLAN.md` is the handoff document** — read it before merging, renumbering or applying any migration; it covers the unmerged contact-boundary line and the conflicting migration numbers.
 
 ## Deployment
 
