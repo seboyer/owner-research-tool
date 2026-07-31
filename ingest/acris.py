@@ -31,6 +31,7 @@ from database.client import (
     start_ingestion_log, finish_ingestion_log,
 )
 from database.retry import retry_external
+from ingest import pluto
 from ingest.hpd import _TRANSIENT_NET_ERRORS, paginate  # reuse the paginator + transient set
 
 log = structlog.get_logger(__name__)
@@ -207,7 +208,28 @@ async def ingest_acris_deeds():
             _fetch_legals_for_docs(new_doc_ids),
         )
 
-        # Step 3: Process each deed
+        # Step 3: Resolve building size once for the whole batch.
+        #
+        # ACRIS covers every deed transfer, including 1-2 family homes whose
+        # buyers are private homeowners rather than landlords. Gating here
+        # rather than downstream is what keeps them out of the enrichment
+        # spend entirely. Fails open — see ingest/pluto.py.
+        batch_bbls = {
+            bbl for d in new_doc_ids
+            if (legal := legals.get(d)) and (bbl := _build_bbl(legal))
+        }
+        admitted = await pluto.admits(batch_bbls)
+        gated_out = len(batch_bbls) - len(admitted)
+        if gated_out:
+            log.info(
+                "acris.size_gate",
+                bbls=len(batch_bbls),
+                admitted=len(admitted),
+                excluded=gated_out,
+                min_units=config.PLUTO_MIN_RESIDENTIAL_UNITS,
+            )
+
+        # Step 4: Process each deed
         for doc_id in new_doc_ids:
             doc_parties = parties.get(doc_id, [])
             legal = legals.get(doc_id)
@@ -221,6 +243,13 @@ async def ingest_acris_deeds():
                 mark_seen("acris_deed", doc_id)
                 continue
 
+            if bbl not in admitted:
+                # Below the unit threshold. mark_seen so the next run does
+                # not re-fetch and re-gate the same document.
+                mark_seen("acris_deed", doc_id)
+                stats["records_skipped"] += 1
+                continue
+
             try:
                 # Upsert property
                 borough_names = {"1": "MANHATTAN", "2": "BRONX", "3": "BROOKLYN", "4": "QUEENS", "5": "STATEN ISLAND"}
@@ -231,6 +260,9 @@ async def ingest_acris_deeds():
                     "street_name": legal.get("street_name", ""),
                     "house_number": legal.get("address_number", ""),
                     "address": f"{legal.get('address_number', '')} {legal.get('street_name', '')}".strip(),
+                    # The gate already resolved this BBL, so persisting it
+                    # here costs nothing and spares the next run the lookup.
+                    **pluto.property_fields(pluto.cached(bbl)),
                 })
 
                 # Upsert each buyer

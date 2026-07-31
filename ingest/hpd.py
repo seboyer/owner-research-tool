@@ -27,6 +27,7 @@ from database.client import (
     upsert_property_role, start_ingestion_log, finish_ingestion_log,
 )
 from database.retry import retry_external
+from ingest import pluto
 
 log = structlog.get_logger(__name__)
 
@@ -98,6 +99,22 @@ async def paginate(url: str, where: str = None) -> AsyncIterator[dict]:
                 break
             offset += SOCRATA_PAGE_SIZE
             await asyncio.sleep(0.1)  # be polite
+
+
+async def buffered(rows: AsyncIterator[dict], size: int) -> AsyncIterator[list[dict]]:
+    """Regroup a row stream into lists.
+
+    The PLUTO size gate is a batched lookup; feeding it one row at a time
+    would turn a single request into one per building.
+    """
+    batch: list[dict] = []
+    async for row in rows:
+        batch.append(row)
+        if len(batch) >= size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
 
 # ============================================================
@@ -235,58 +252,77 @@ async def ingest_hpd_registrations():
         # in the future (HPD registrations are renewed annually).
         where_clause = f"registrationenddate >= '{date.today().isoformat()}'"
 
-        async for reg in paginate(config.HPD_REGISTRATIONS_URL, where=where_clause):
-            stats["records_fetched"] += 1
+        pages = buffered(paginate(config.HPD_REGISTRATIONS_URL, where=where_clause), 500)
+        async for batch in pages:
+            # Resolve building size for the whole batch up front. HPD mostly
+            # registers 3+ unit buildings, but 1-2 family dwellings whose
+            # owner does not reside there are registered too, and those are
+            # private homeowners rather than landlords.
+            admitted = await pluto.admits(
+                f"{r.get('boroid', '')}{r.get('block', '').zfill(5)}{r.get('lot', '').zfill(4)}"
+                for r in batch
+                if r.get("boroid") and r.get("block") and r.get("lot")
+            )
 
-            reg_id = reg.get("registrationid", "")
-            boro = reg.get("boroid", "")
-            block = reg.get("block", "").zfill(5)
-            lot = reg.get("lot", "").zfill(4)
+            for reg in batch:
+                stats["records_fetched"] += 1
 
-            if not (boro and block and lot):
-                continue
+                reg_id = reg.get("registrationid", "")
+                boro = reg.get("boroid", "")
+                block = reg.get("block", "").zfill(5)
+                lot = reg.get("lot", "").zfill(4)
 
-            try:
+                if not (boro and block and lot):
+                    continue
+
                 bbl = f"{boro}{block}{lot}"
-                # The Socrata column is `zip`, not `zipcode`. The previous name
-                # silently returned None and left every property's zip_code NULL,
-                # which in turn made the zipcode allowlist's unknown-zip bypass
-                # match every entity. Adding zip to the checksum forces a
-                # re-ingest of rows that were stored without it.
-                zip_code = (reg.get("zip") or "").strip() or None
-                chk = checksum({"boro": boro, "block": block, "lot": lot, "zip": zip_code or ""})
-
-                if already_seen("hpd_registration", reg_id, chk):
+                if bbl not in admitted:
                     stats["records_skipped"] += 1
                     continue
 
-                borough_names = {"1": "MANHATTAN", "2": "BRONX", "3": "BROOKLYN", "4": "QUEENS", "5": "STATEN ISLAND"}
+                try:
+                    # The Socrata column is `zip`, not `zipcode`. The previous name
+                    # silently returned None and left every property's zip_code NULL,
+                    # which in turn made the zipcode allowlist's unknown-zip bypass
+                    # match every entity. Adding zip to the checksum forces a
+                    # re-ingest of rows that were stored without it.
+                    zip_code = (reg.get("zip") or "").strip() or None
+                    chk = checksum({"boro": boro, "block": block, "lot": lot, "zip": zip_code or ""})
 
-                address = f"{reg.get('housenumber', '').strip()} {reg.get('streetname', '').strip()}".strip()
+                    if already_seen("hpd_registration", reg_id, chk):
+                        stats["records_skipped"] += 1
+                        continue
 
-                upsert_property(bbl, {
-                    "bbl": bbl,
-                    "borough": borough_names.get(str(boro), boro),
-                    "block": block,
-                    "lot": lot,
-                    "address": address,
-                    "zip_code": zip_code,
-                    "unit_count": reg.get("unitcount", None),
-                    "building_class": reg.get("buildingclassid", None),
-                    "hpd_reg_id": reg_id,
-                    "raw_data": reg,
-                })
+                    borough_names = {"1": "MANHATTAN", "2": "BRONX", "3": "BROOKLYN", "4": "QUEENS", "5": "STATEN ISLAND"}
 
-                mark_seen("hpd_registration", reg_id, chk)
-                stats["records_created"] += 1
+                    address = f"{reg.get('housenumber', '').strip()} {reg.get('streetname', '').strip()}".strip()
 
-            except _TRANSIENT_NET_ERRORS as e:
-                log.warning(
-                    "hpd_registrations.transient_skip",
-                    reg_id=reg_id,
-                    error=f"{type(e).__name__}: {e}".rstrip(": "),
-                )
-                continue
+                    upsert_property(bbl, {
+                        "bbl": bbl,
+                        "borough": borough_names.get(str(boro), boro),
+                        "block": block,
+                        "lot": lot,
+                        "address": address,
+                        "zip_code": zip_code,
+                        # unit_count / building_class come from PLUTO: the
+                        # tesw-yqqr dataset has no unitcount or
+                        # buildingclassid column, so reading them off `reg`
+                        # returned None for every row ever ingested.
+                        **pluto.property_fields(pluto.cached(bbl)),
+                        "hpd_reg_id": reg_id,
+                        "raw_data": reg,
+                    })
+
+                    mark_seen("hpd_registration", reg_id, chk)
+                    stats["records_created"] += 1
+
+                except _TRANSIENT_NET_ERRORS as e:
+                    log.warning(
+                        "hpd_registrations.transient_skip",
+                        reg_id=reg_id,
+                        error=f"{type(e).__name__}: {e}".rstrip(": "),
+                    )
+                    continue
 
         finish_ingestion_log(log_id, stats)
         log.info("hpd_registrations.complete", **stats)
