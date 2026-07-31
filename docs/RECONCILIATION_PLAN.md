@@ -234,12 +234,27 @@ and one named after the actual operating company.
 
 ---
 
-## 5A. Ready to land — session of 2026-07-27
+## 5A. DONE — session of 2026-07-27/31
 
-Two PRs' worth of work sits in this working copy, finished and verified
-against the live systems. It could not be pushed for the reason in §1:
-there is still no git repository here. **The code is already on the Mac —
-unison syncs these files.** Only the git operation is outstanding.
+> **Status: executed 2026-07-31.** The §1 blocker is resolved — unison now
+> syncs `.git`, so this directory is a real checkout. Both PRs below are
+> **open on GitHub**:
+>
+> | PR | Branch | Base |
+> |---|---|---|
+> | [#45](https://github.com/seboyer/owner-research-tool/pull/45) | `size-gate-and-sync-fixes` | `airtable-crm-sync` |
+> | [#46](https://github.com/seboyer/owner-research-tool/pull/46) | `ingest-size-gate` | `size-gate-and-sync-fixes` |
+>
+> Stacked 44 → 45 → 46; merge in that order. Built in a throwaway clone off
+> `origin/airtable-crm-sync` so the synced `.git` and the unpushed
+> `contact-boundary` WIP were never touched.
+>
+> **`docs/HANDOFF_2026-07-31_size_gate.md` is the handoff for the
+> `contact-boundary` session** — read that one if you are working on the
+> contact-boundary line. It covers the `ingest/hpd.py` conflict and two
+> live-database changes.
+>
+> The rest of this section is the plan as written, kept for the reasoning.
 
 ### Ground truth, re-verified 2026-07-27
 
