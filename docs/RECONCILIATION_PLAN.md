@@ -222,7 +222,7 @@ Then update the migration list in `CLAUDE.md` and the references in
 
 | Concern | On `main` | In the sync | Resolution |
 |---|---|---|---|
-| Government filter | `filters.py` + SQL `is_govt_name()` (022) | `_EXTRA_GOVT_RE` | widen `COMMIS+ION…` in **both**, then delete the patch |
+| Government filter | `filters.py` **done in this tree** (`_COMMISSIONER`) + SQL `is_govt_name()` (022) **still open** | `_EXTRA_GOVT_RE` (redundant on the Python path, retained) | widen `is_govt_name()` to match, then delete the patch |
 | Bank/lender filter | `skip_filter._BANK_RE` | `_EXTRA_BANK_RE` | fix at source, then delete the patch |
 | Company name resolution | 4-tier COALESCE in the Zapier view (022) | `entities.name` | **port the cascade into the sync** |
 | Contact eligibility | `WHERE email/phone NOT NULL` in the view | the sync's quality gate | converge on `status='published'` if Phase 3 lands |
@@ -231,6 +231,189 @@ The company-name cascade is the one worth porting deliberately: employer →
 LLC chain → owned LLC → direct entity is better than what the sync does
 today. It is the difference between a Management named `WOODS, REGINALD R`
 and one named after the actual operating company.
+
+---
+
+## 5A. Ready to land — session of 2026-07-27
+
+Two PRs' worth of work sits in this working copy, finished and verified
+against the live systems. It could not be pushed for the reason in §1:
+there is still no git repository here. **The code is already on the Mac —
+unison syncs these files.** Only the git operation is outstanding.
+
+### Ground truth, re-verified 2026-07-27
+
+Ran §2 Step 0. Nothing has moved since this document was written:
+
+| Check | Result |
+|---|---|
+| PR #44 | **open**, unmerged, branch `airtable-crm-sync` |
+| Other open PRs | none |
+| `main` HEAD | `6350706` (2026-05-24) — unchanged |
+
+### The wholesale-copy trap, now measured
+
+§4 warned that four shared files must be hand-applied. Diffing this tree
+against `origin/airtable-crm-sync` shows **the list is longer than four**,
+and two of the additions are ones a careless copy would silently regress:
+
+| File | Verdict | What a wholesale copy would destroy |
+|---|---|---|
+| `pipeline/airtable_sync.py` | **take wholesale** | nothing — every difference is from this session |
+| `ingest/pluto.py` | **new** | — |
+| `scripts/purge_small_buildings.py` | **new** | — |
+| `ingest/acris.py` | **take wholesale** | nothing — verified, every difference is from this session |
+| `enrichment/contact/filters.py` | **hand-apply** | `is_govt_email()` **and 12 government patterns** (`SECY OF HOUSING`, `IRS`, `DOJ`, `FBI`, `INTERNAL REVENUE`, `SOCIAL SECURITY ADMIN`, …). `main`'s `(?:^|\s)HUD\b` is also better than this tree's `\bHUD\b`, which false-positives on HUDSON. Confirms Phase 3's "take `main`'s `filters.py`". |
+| `ingest/hpd.py` | **hand-apply** | `upsert_contact()` — this tree uses the unmerged contact-boundary `record_contact`/`ContactHit` refactor |
+| `admin/routes.py` | **hand-apply** | the `zoominfo` → `company_enrich` rename from `main` 016 |
+| `config.py` | **hand-apply** | `COST_PER_ENTITY_COMPANY_ENRICH`; would resurrect the deleted `ZOOMINFO_MIN_PORTFOLIO_SIZE` |
+| `main.py` | **hand-apply** | `enrich-company` (§4) |
+| `CLAUDE.md` | **hand-apply** | §4 |
+
+Only apply the named hunks to the hand-apply files. Everything else in
+them belongs to `main`.
+
+**No migrations were added or changed.** `database/migrations/` is
+untouched at 17 files — `properties.unit_count` and `.building_class`
+already existed in `schema.sql` and had simply never been populated. This
+whole body of work is therefore independent of the 016/017/018 numbering
+conflict and can land without waiting on Phases 2–3.
+
+### PR A — onto the existing `airtable-crm-sync` branch (updates #44)
+
+Self-contained and deployable on its own. `airtable_sync.py` imports
+`is_landlord_lot` from `ingest/pluto.py`, so the PLUTO *module* ships here
+even though ingest-time gating waits for PR B.
+
+Files: `pipeline/airtable_sync.py`, `ingest/pluto.py` (new),
+`scripts/purge_small_buildings.py` (new), `enrichment/contact/filters.py`†,
+`config.py`†, `main.py`†, `admin/routes.py`†, `CLAUDE.md`†,
+`docs/AIRTABLE_SYNC.md`, `docs/CRM_DEDUPLICATION.md`, this file.
+(† hand-apply)
+
+```markdown
+## CRM sync correctness, personal-name handling, and the building-size gate
+
+Builds on the sync introduced in this PR. Four independent defects, plus
+the read side of a new size gate.
+
+**1. Management names were being written surname-first.** 83% of units
+(440/532) are `LAST, FIRST` — ACRIS deed parties, all `entity_type=
+'individual'`, all holding an `owner` role. They are landlords who own
+apartment buildings in their own name rather than through an LLC, so the
+data is right; only the presentation was wrong. `format_person_name()`
+reorders them, shape-gated so company names and ACRIS annotations
+(`JAMES, DOROTHY M/ADMIN OF`) pass through untouched.
+
+The rename needed a matching key or every renamed person would duplicate
+against their own existing record, so `person_key()` (sorted tokens) and a
+`mgmt_by_person_key` index came with it.
+
+**2. `_acceptable()` could not find an entity's own Management** when the
+stored spelling differed in word order, so the rule "a weak cross-entity
+signal never outranks an entity's own record" silently lapsed. This was a
+pre-existing bug the rename surfaced. **Merges dropped 17 → 7.** Ten
+landlords had been fusing into unrelated people on a shared email —
+`Edmee Fontaine` and `Willis Attico` both into `ANDERSON, BERRIS`.
+
+**3. `company_domain()` treated consumer ISPs and third parties as company
+domains.** Of 45 non-free domains on individual owners, 16 were legacy ISPs
+(`onebox`, `citlink`, `qwest`, `uswest`, `angelfire`, `concentric.net`, …)
+and 12 were brokerages or law firms — the listing agent or closing
+attorney, never the landlord. Both classes fed `mgmt_by_domain`, so they
+merged unrelated landlords who happened to share an ISP. Adds the ISPs to
+`_FREE_EMAIL_DOMAINS` and a new `_THIRD_PARTY_DOMAIN_RE`.
+
+Related and deliberately **not** done: deriving a company name from the
+domain. 92% of these emails (384/419) have a local part sharing no name
+token with the entity — BatchData skip-traces the *address* and returns
+whoever it finds. A hard-gated rule yields 9 of 440.
+
+**4. Paged reads without `ORDER BY` silently skip and duplicate rows.**
+Postgres does not guarantee ordering across `.range()` requests. Found when
+a backfill processed 87,845 of 135,388 rows — a 35% under-read. Fixed in
+`airtable_sync.py` (the contact load, which would have started losing
+people the moment contacts passed 1,000), `main.py` and `admin/routes.py`.
+`scripts/backfill_*.py` already had it right.
+
+**5. Read-side building-size gate.** `_attach_addresses()` drops entities
+whose every property is a one- or two-family home, via
+`ingest.pluto.is_landlord_lot()` — the same predicate the ingest gate uses,
+so the two cannot drift. Fails open twice: unknown `unit_count` qualifies,
+and an entity with no `property_roles` is kept (management companies
+reached via a contact's employer own nothing directly).
+
+**Government filter fixed upstream.** `filters.py` now builds the
+Commissioner patterns from `_COMMISSIONER = COMM(?:IS+(?:IO|O|OI)N(?:ER)?)?`,
+varying the S count, the vowels and the trailing `ER` independently. Note
+the fix suggested in `CLAUDE.md` (`COMMIS+ION(?:ER)?`) would have **lost**
+`COMMISSONER` and `COMMISSOINER`. `_EXTRA_GOVT_RE` is retained despite
+being redundant: SQL `is_govt_name()` (022) still has the gap.
+
+### Verification
+
+- `sync-airtable` applied, then `--dry-run`: **0 creates, 0 updates, no new
+  merges** — converges per CLAUDE.md.
+- Merges 17 → 7 → 6 (one merging entity fell below the size threshold).
+- Formatter, `person_key`, domain and `is_landlord_lot` cases: all pass.
+- `ruff` clean on changed files; the repo's other 115 errors are
+  pre-existing.
+
+### Already executed against production
+
+- `backfill-pluto`: 131,047 of 135,388 properties populated.
+- `purge_small_buildings.py --apply`: **55 Managements, 72 Contacts, 55
+  Addresses deleted**; 1 Management protected because a surviving unit
+  still resolved to it. Idempotent — a re-run finds nothing.
+```
+
+### PR B — stacked on A, or cut after A merges
+
+Changes what gets **ingested**, so it is worth reviewing separately.
+
+Files: `ingest/acris.py`, `ingest/hpd.py`†, `CLAUDE.md`†.
+
+```markdown
+## Gate ingestion on building size
+
+ACRIS records every deed transfer regardless of building size, so the
+pipeline stored one- and two-family homes and paid to enrich private
+homeowners. `pluto.admits()` runs once per ingest batch in ACRIS and HPD;
+lots failing `is_landlord_lot()` are never stored.
+
+**Mixed use is explicitly in.** `A`/`B` class (one- and two-family) is out
+always; `S`/`K` (apartments over a store) is in on any residential unit and
+exempt from the unit threshold — commercial space under the apartments
+means the owner runs a building rather than living in a house. A store with
+no apartments stays out.
+
+**`unit_count` and `building_class` had never been populated — 100% NULL
+across 135,388 rows.** `ingest/hpd.py` read `reg.get("unitcount")` and
+`reg.get("buildingclassid")`, and the HPD Registrations dataset
+(`tesw-yqqr`) **has neither column**; both calls returned `None` for every
+row ever ingested. PLUTO is the only NYC source that publishes them.
+
+That silently degraded `skip_filter._evaluate_low_value()`: its
+`+0.30 unit_count >= 3` bonus could never fire and its `-0.50 max_units
+<= 2` penalty always did, leaving it an `hpd_reg_id` check in disguise.
+
+HPD's row stream needed a new `buffered()` helper — feeding a batched
+lookup one row at a time would turn one request into one per building.
+
+**The gate fails open.** A BBL PLUTO does not know, or a failed request, is
+admitted; 4,341 of 135,388 properties are not in PLUTO. Silently dropping
+real ownership data is worse than carrying a few small buildings.
+
+Measured effect: ~25,400 lots (19% of those with a known size) would no
+longer be stored, along with the enrichment spend behind them.
+```
+
+### Sequencing
+
+1. Update #44 with PR A. It is self-contained; the ingest gate is not
+   required for it to be correct.
+2. Land PR B after, or stack it — `is_landlord_lot()` lives in PR A.
+3. Neither blocks, nor is blocked by, Phases 2–4.
 
 ---
 
@@ -248,6 +431,10 @@ and one named after the actual operating company.
 - **Do not delete `_EXTRA_GOVT_RE` / `_EXTRA_BANK_RE`** from
   `pipeline/airtable_sync.py` on the assumption that `main` covers them. An
   earlier draft of this plan said exactly that and was wrong — see §3.
+  `_EXTRA_GOVT_RE`'s Python-side gap is now fixed in this tree's
+  `filters.py`, which is *not* the same as `main` covering it: taking
+  `main`'s `filters.py` during reconciliation reopens the gap, and SQL
+  `is_govt_name()` still has it. Delete only once both sides are widened.
 
 ---
 

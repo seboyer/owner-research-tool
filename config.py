@@ -124,6 +124,22 @@ class Config:
     COST_PER_ENTITY_MULTI_SOURCE: float = float(os.getenv("COST_PER_ENTITY_MULTI_SOURCE", "1.00"))
 
     # ------------------------------------------------------------------
+    # Building-size gate (PLUTO)
+    #
+    # ACRIS records every deed transfer regardless of building size, so
+    # without a gate the pipeline stores 1-2 family homes and pays to
+    # enrich owners who are not landlords. PLUTO supplies the residential
+    # unit count HPD does not publish.
+    #
+    # A lot is admitted when it looks like a landlord property — see
+    # ingest.pluto.is_landlord_lot() — or when PLUTO has no record of the
+    # BBL (the gate fails open). Set PLUTO_GATE_ENABLED=false to store
+    # everything and rely on downstream filtering instead.
+    # ------------------------------------------------------------------
+    PLUTO_MIN_RESIDENTIAL_UNITS: int = int(os.getenv("PLUTO_MIN_RESIDENTIAL_UNITS", "3"))
+    PLUTO_GATE_ENABLED: bool = os.getenv("PLUTO_GATE_ENABLED", "true").lower() != "false"
+
+    # ------------------------------------------------------------------
     # Webhook + Airtable integration (manual address feed)
     # ------------------------------------------------------------------
     WEBHOOK_PORT: int = int(os.getenv("PORT", "8000"))  # Render injects PORT

@@ -157,6 +157,7 @@ def _fetch_all_property_zips() -> list[str]:
             .select("zip_code")
             .neq("zip_code", "")
             .not_.is_("zip_code", "null")
+            .order("id")  # unordered paging drops and duplicates rows
             .range(offset, offset + page_size - 1)
             .execute()
         )
@@ -268,6 +269,7 @@ def _count_null_zip_properties_by_borough() -> dict[str, int]:
             .table("properties")
             .select("bbl")
             .or_("zip_code.is.null,zip_code.eq.")
+            .order("id")  # unordered paging drops and duplicates rows
             .range(offset, offset + page_size - 1)
             .execute()
         )
