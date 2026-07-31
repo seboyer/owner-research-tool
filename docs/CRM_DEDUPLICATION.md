@@ -246,12 +246,15 @@ This matters for several claims made earlier in this document:
 - **The government filter is mostly solved on `main`, with one live gap.**
   `022` defines `is_govt_name()` / `is_govt_email()` in SQL, and `main`'s
   `enrichment/contact/filters.py` has matching Python patterns plus
-  `is_govt_email()`. But both spell the misspellings
+  `is_govt_email()`. Both used to spell the misspellings
   `COMM(?:ISSIONER|ISSONER|ISSOINER)?` — every alternative double-S — so
   `COMMISIONER OF FINANCE`, the single-S form ACRIS actually records,
-  returns `False` and passes straight through. `_EXTRA_GOVT_RE` in
-  `pipeline/airtable_sync.py` is narrowed to exactly that gap; the fix
-  belongs upstream in both `filters.py` and the SQL function.
+  returned `False` and passed straight through. **`filters.py` is now
+  fixed**: `_COMMISSIONER = COMM(?:IS+(?:IO|O|OI)N(?:ER)?)?` varies the S
+  count, the vowels and the trailing `ER` independently. **The SQL
+  `is_govt_name()` still carries the gap** — it is on `main`, not in this
+  working copy. `_EXTRA_GOVT_RE` in `pipeline/airtable_sync.py` is retained
+  as cover until the SQL side is widened too.
 - **The bank/lender patch is still needed.** `skip_filter._BANK_RE` uses
   `\bSAVINGS\b` / `\bBANK\b`, which do not match `GREEN POINT SAVINGSBANK`,
   `AMERICAN BROKERS CONDUIT` or `CARVER FEDL SAVS & LOAN ASSN`. Verified on
@@ -456,5 +459,7 @@ Build §6 first.
 - Migrations 017/018 *of this line* are unapplied, so neither path can
   filter on `contacts.status = 'published'` — the quality gate stands in
   for it.
-- `_EXTRA_GOVT_RE` / `_EXTRA_BANK_RE` in `pipeline/airtable_sync.py` each
-  cover a verified upstream gap and must stay until fixed at source (§3b).
+- `_EXTRA_BANK_RE` in `pipeline/airtable_sync.py` covers a verified upstream
+  gap and must stay until fixed at source (§3b). `_EXTRA_GOVT_RE`'s Python
+  gap is fixed in `filters.py`, but it stays until SQL `is_govt_name()`
+  (on `main`) is widened to match.
