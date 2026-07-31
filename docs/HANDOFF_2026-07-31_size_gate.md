@@ -151,14 +151,17 @@ measured rather than assumed.
 
 ---
 
-## 6. One open question
+## 6. Scope of this analysis — confirmed complete
 
 The request that produced this work described the WIP as *"fable refactor
-/ match confidence scores"*. The match-confidence work is unmistakable —
-`scoring.py`, `network_distance`, the two 2026-07-31 commits. **No "fable
-refactor" exists anywhere in the repository**: not in any branch, not in
-any commit message, and `git log --all -S'fable'` returns nothing.
+/ match confidence scores"*, which initially read as two separate bodies
+of work. `git log --all -S'fable'` returns nothing and no branch or commit
+mentions it.
 
-Assumed: "fable refactor" is the Wave 1 rewrite itself (authored in a
-Fable session). If it is instead separate, unsynced work, then the
-conflict analysis in §2 does not cover it and should be redone against it.
+**Resolved by the owner: "Fable refactor" was the GUI session name, not a
+separate change.** The `contact-boundary` Wave 0/1 line — candidate→publish
+boundary, observations, `scoring.py`, `network_distance` — is the only
+ongoing WIP.
+
+So §2 covers the full conflict surface: `ingest/hpd.py`, `main.py`,
+`CLAUDE.md`. Nothing outstanding.
