@@ -7,6 +7,15 @@ without duplication.
 
 import re
 
+# "Commissioner" as ACRIS actually spells it. Three things vary
+# independently: the number of S's (COMMISIONER is as common as
+# COMMISSIONER), the vowels before the N (IO / O / OI), and whether the
+# trailing "ER" is there at all ("COMMISSION OF FINANCE"). Spelling the
+# variants out as whole alternatives is what let the single-S forms slip
+# through before. Bare "COMM" is the abbreviation ACRIS also records; the
+# whole suffix stays optional so "COMM OF FINANCE" still matches.
+_COMMISSIONER = r"COMM(?:IS+(?:IO|O|OI)N(?:ER)?)?"
+
 # Each tuple is a regex pattern (case-insensitive).  We use flexible patterns
 # rather than exact strings because ACRIS records have many misspellings,
 # missing spaces, and abbreviations for government entities.
@@ -17,10 +26,10 @@ _GOVT_PATTERNS: list[str] = [
     r"THE\s+CITY\s+OF",           # "THE CITY OF NEW YORK", "THE CITY OFNEW YORK"
     r"\bN\.?Y\.?C\.?\b",         # NYC, N.Y.C., N.Y.C (standalone)
 
-    # Commissioner of Finance — many misspellings
-    r"COMM(?:ISSIONER|ISSONER|ISSOINER)?\s+OF\s+FIN",  # all the misspellings
-    r"COMM\s+OF\s+FINANCE",
-    r"COMMISSIONER\s+FINANCE",    # "COMMISSIONER FINANCE OF THE CITY..."
+    # Commissioner of Finance — many misspellings.
+    # ("COMM OF FINANCE" is covered here too: the suffix is optional.)
+    rf"{_COMMISSIONER}\s+OF\s+FIN",
+    rf"{_COMMISSIONER}\s+FINANCE",   # "COMMISSIONER FINANCE OF THE CITY..."
     r"DEPT\s+OF\s+FINANCE",
     r"DEPARTMENT\s+OF\s+FINANCE",
     r"FINANCE\s+ADMI+N",          # "FINANCE ADMINISTRATION", "FINANCE ADMIN", "FINANCE ADMIMINISTRATION"

@@ -41,7 +41,9 @@ python main.py enrich-contacts --force              # ignore 90-day cache
 python main.py stats              # print DB statistics
 python main.py pierce --entity "123 BROADWAY LLC"  # pierce a specific LLC
 python main.py pierce --address "123 BROADWAY, MANHATTAN"  # research a full address
-python main.py ingest hpd|acris|wow           # individual ingestors
+python main.py ingest hpd|acris|wow|pluto     # individual ingestors
+python main.py backfill-pluto     # fill properties.unit_count/building_class from PLUTO
+python main.py backfill-pluto --all  # re-check every property, not just NULL ones
 python main.py schedule           # start persistent scheduler (production)
 python main.py sync-airtable --dry-run  # preview the Airtable CRM sync
 python main.py sync-airtable      # push Managements/Contacts/Addresses to Airtable
@@ -184,6 +186,25 @@ Core tables: `properties` (BBL-keyed, includes `house_number` + `street_name` as
 
 Key views: `broker_pitch_list` (property + owner co + mgmt co + signer in one row). Earlier views (`landlord_profiles`, `unpierced_llcs`, `crm_export`) were dropped in migration 003 — they were unused.
 
+### Building-size gate (`ingest/pluto.py`)
+
+**`is_landlord_lot(units_res, bldg_class)` is the single definition of what qualifies**, used by both the ingest gate and the CRM sync so they cannot drift. The target is landlords; the thing being excluded is the owner-occupied home:
+
+- **`A`/`B` class → out, always.** One- and two-family dwellings. `B` goes even though it has a tenant — it is the classic owner-upstairs house.
+- **`S`/`K` class → in, on any residential unit at all**, and *not* subject to the unit threshold. Commercial space under the apartments means the owner runs a building rather than living in a house. A store with zero apartments is still out; this is a residential-landlord pipeline.
+- Everything else → in at `unitsres >= PLUTO_MIN_RESIDENTIAL_UNITS` (default 3).
+
+- **The gate fails open.** A BBL PLUTO does not know, or a failed PLUTO request, is *admitted*. Silently dropping real ownership data is worse than carrying a few small buildings. 4,341 of 135,388 properties are not in PLUTO.
+- **`lookup()` is batched and cached**; `cached(bbl)` never issues a request, so it is safe inside a per-row loop.
+- **PLUTO is the only source for these columns.** HPD Registrations (`tesw-yqqr`) has no `unitcount` and no `buildingclassid` column; reading them off a registration row returns `None` for every row, which is why `unit_count` and `building_class` were NULL across the whole table. That also silently degraded `skip_filter`'s `low_value_score` — its `unit_count >= 3` bonus could never fire and its `max_units <= 2` penalty always did.
+- `properties.unit_count` stores **`unitsres` only**, not `unitstotal`.
+
+Backfilled 2026-07-31: 131,047 of 135,388 properties populated. Distribution — 1,747 at 0 residential units, 6,097 at 1, 17,552 at 2, 105,651 at 3+.
+
+### Paging Supabase reads
+
+Always `.order("id")` (or another stable column) on a paged `.range()` read. Postgres does not guarantee row order across requests for an unordered select, so paging one silently **skips and duplicates** rows. This produced a real 35% under-read during the PLUTO backfill (87,845 of 135,388 rows seen) before it was caught.
+
 ### External API Tiers
 
 - **Free/public**: NYC OpenData (HPD, ACRIS, PLUTO, DOB permits via Socrata)
@@ -230,9 +251,13 @@ After any change to the matching rules, run the sync then `--dry-run` again — 
 
 Writes are **additive only**. Records the tool did not create never get a field overwritten, never have Pipeline touched, and never receive the ORT note / checkbox / Types link — they did not originate here.
 
+`_attach_addresses()` applies the **read-side building-size gate** — the counterpart to the ingest gate, covering sub-threshold lots ingested before that gate existed. It calls the same `ingest.pluto.is_landlord_lot()`. An entity is dropped when *every* property it holds fails; failing addresses are withheld even from entities that survive on a larger building. It fails open twice over: a property with a NULL `unit_count` qualifies, and an entity with **no** `property_roles` at all is kept — management companies reached via a contact's employer own nothing directly and are the most valuable records here. As of 2026-07-31 this drops 56 of 532 units (52 individual, 4 unknown; all `A`/`B` class).
+
+**`scripts/purge_small_buildings.py`** is the one-off retraction of what earlier runs already pushed — the sync itself never deletes, which is why this is a separate script and not a sync mode. Four rules: only ORT-flagged Managements; never a Management a surviving unit still resolves to; Contacts only when ORT-flagged *and* every Management link is doomed; Addresses only when every link is doomed (that table has no ORT flag, so sole-linkage is the only evidence of origin). Run 2026-07-31: 55 Managements, 72 Contacts, 55 Addresses deleted; 1 Management protected by the shared-record rule.
+
 `_EXTRA_GOVT_RE` / `_EXTRA_BANK_RE` in that module patch two verified gaps in the shared filters. Both are narrowly scoped so enrichment behavior is unchanged, and both should be fixed upstream rather than widened here:
 
-- `filters.is_govt_entity()` spells the misspellings `COMM(?:ISSIONER|ISSONER|ISSOINER)?` — every alternative double-S — so it returns `False` for `COMMISIONER OF FINANCE`, the single-S form ACRIS actually records. The same gap exists in the SQL `is_govt_name()` from migration 022.
+- `filters.is_govt_entity()` **is now fixed** — it builds the Commissioner patterns from `_COMMISSIONER = COMM(?:IS+(?:IO|O|OI)N(?:ER)?)?`, varying the S count, the vowels and the trailing `ER` independently, so `COMMISIONER OF FINANCE` (the single-S form ACRIS actually records) matches along with `COMMISSONER`, `COMMISSOINER` and `COMMISSION`. `_EXTRA_GOVT_RE` is therefore redundant on the Python path and is retained only because **the SQL `is_govt_name()` from migration 022 still has the gap**. Delete both together or neither.
 - `skip_filter._BANK_RE` uses `\bSAVINGS\b` / `\bBANK\b`, which miss `GREEN POINT SAVINGSBANK`, `AMERICAN BROKERS CONDUIT` and `CARVER FEDL SAVS & LOAN ASSN` — all real "owners" on ACRIS foreclosure deeds.
 
 A Zapier zap writes these same three tables from the `zapier_enriched_contacts` view (migrations 018–022), i.e. two implementations of one job. It uses a New Row trigger, so it does not re-create records this sync has already written; the overlap applies to newly enriched contacts going forward, and choosing one path is still open. `docs/CRM_DEDUPLICATION.md` compares them. **`docs/RECONCILIATION_PLAN.md` is the handoff document** — read it before merging, renumbering or applying any migration; it covers the unmerged contact-boundary line and the conflicting migration numbers.

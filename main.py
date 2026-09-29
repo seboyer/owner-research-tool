@@ -234,7 +234,7 @@ def schedule():
 
 
 @cli.command("ingest")
-@click.argument("source", type=click.Choice(["hpd", "acris", "wow"]))
+@click.argument("source", type=click.Choice(["hpd", "acris", "wow", "pluto"]))
 def ingest(source: str):
     """Run a single ingestor."""
     async def _run():
@@ -247,9 +247,34 @@ def ingest(source: str):
         elif source == "wow":
             from ingest.whoownswhat import run
             await run()
+        elif source == "pluto":
+            from ingest.pluto import run
+            await run()
 
     asyncio.run(_run())
     click.echo(f"Ingestor '{source}' complete.")
+
+
+@cli.command("backfill-pluto")
+@click.option("--limit", type=int, default=None, help="Only process the first N properties.")
+@click.option("--all", "all_rows", is_flag=True,
+              help="Re-check every property, not just those missing unit_count.")
+def backfill_pluto(limit: int, all_rows: bool):
+    """Fill properties.unit_count / building_class from PLUTO.
+
+    Needed once: HPD Registrations has no unitcount or buildingclassid
+    column, so both columns are NULL for every row ingested before the
+    PLUTO gate existed.
+    """
+    from ingest.pluto import backfill_properties
+
+    stats = asyncio.run(backfill_properties(limit=limit, only_missing=not all_rows))
+    click.echo(
+        f"\nProperties considered {stats['properties']}\n"
+        f"  matched in PLUTO    {stats['matched']}\n"
+        f"  rows updated        {stats['updated']}\n"
+        f"  not in PLUTO        {stats['unmatched']}"
+    )
 
 
 @cli.command("sync-airtable")

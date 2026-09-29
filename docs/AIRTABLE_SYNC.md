@@ -187,9 +187,11 @@ and there is no bank/lender rule for ACRIS foreclosure deeds recording
 `GREEN POINT SAVINGSBANK` or `AMERICAN BROKERS CONDUIT` as the "owner".
 
 `_EXTRA_GOVT_RE` / `_EXTRA_BANK_RE` in `airtable_sync.py` supplement the
-shared filters locally rather than editing them, so enrichment behavior is
-unchanged. **The underlying gap in `filters.py` is still open** — fixing it
-there would let this module drop its local patterns.
+shared filters locally rather than editing them. **The government gap in
+`filters.py` is now fixed** (`_COMMISSIONER`), so `_EXTRA_GOVT_RE` no longer
+changes any outcome on the Python path; it is retained only until SQL
+`is_govt_name()` on `main` is widened to match. The bank/lender gap in
+`skip_filter._BANK_RE` is still open, so `_EXTRA_BANK_RE` is load-bearing.
 
 ### What the gate does *not* remove
 

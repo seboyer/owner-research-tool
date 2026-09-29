@@ -45,6 +45,7 @@ from database.client import db
 from database.retry import retry_external
 from enrichment.contact.filters import is_govt_entity
 from enrichment.skip_filter import _BANK_RE, is_lawyer_name
+from ingest.pluto import is_landlord_lot
 
 log = structlog.get_logger(__name__)
 
@@ -115,17 +116,16 @@ _PHONE_TYPE_MAP = {
 # ("[email protected]") or masked by the source ("s*******a@domain.com").
 _UNUSABLE_EMAIL_RE = re.compile(r"\[email|protected\]|\*", re.IGNORECASE)
 
-# Gaps in the shared filters that are live in this data set. Kept local so
-# enrichment behavior is unchanged; each pattern is here because
-# is_govt_entity() / _BANK_RE demonstrably miss it.
+# Gaps in the shared filters that are live in this data set.
 #
-# filters.py spells the Commissioner-of-Finance misspellings as
-# COMM(?:ISSIONER|ISSONER|ISSOINER)? — every alternative has a double S, so
-# the single-S form ACRIS actually records is not matched:
-#     is_govt_entity('COMMISIONER OF FINANCE') -> False
-# COMMIS+ION covers one-or-more S and so catches both spellings. The other
-# forms it used to cover (SECY OF HOUSING, HOUSING AND URBAN DEV, bare HUD)
-# ARE handled upstream and have been dropped from this pattern.
+# _EXTRA_GOVT_RE is now REDUNDANT on the Python path: filters.py's
+# _COMMISSIONER covers every spelling this matches, including the single-S
+# "COMMISIONER OF FINANCE" that was the original reason for this patch. It
+# is deliberately still here. Deleting it requires the same widening in SQL
+# is_govt_name() (migration 022, which lives on `main` and not in this
+# working copy), because reconciliation may take `main`'s filters.py and
+# silently carry the gap back in. Delete both together or neither —
+# docs/RECONCILIATION_PLAN.md §5 Phase 4, §6.
 _EXTRA_GOVT_RE = re.compile(
     r"COMMIS+ION(?:ER)?\s+OF\s+FIN",
     re.IGNORECASE,
@@ -180,6 +180,36 @@ _FREE_EMAIL_DOMAINS = (
     "charter.net", "roadrunner", "prodigy", "peoplepc", "web.tv", "gmx",
     "protonmail", "proton.me", "zoho", "yandex", "fastmail", "hush.com",
     "example.com", "test.com", "none.com", "domain.com",
+    # Legacy dial-up/cable ISPs and free portals still attached to owners in
+    # this data set. Each one was being read as a company domain, which both
+    # invents a company for a private individual and — because the domain
+    # index is what find_management() consults second — merges every landlord
+    # who happened to use the same ISP.
+    "onebox", "citlink", "qwest", "uswest", "concentric.net", "alltel",
+    "starmedia", "cableone", "bright.net", "libertysurf", "impsat",
+    "angelfire", "frontier.com", "windstream", "suddenlink", "centurylink",
+    "sympatico", "btinternet",
+    # "yaho.com" is the misspelling of yahoo.com, not a company. Matched in
+    # full so it cannot swallow a real domain ending in "yaho".
+    "yaho.com",
+    # Alumni forwarding addresses belong to a university, not to a landlord.
+    "alumni.",
+)
+
+# Domains that are real companies but never the landlord: the listing
+# brokerage or the closing attorney. A brokerage address on an owner record
+# means the owner used that broker, so treating it as their company domain
+# both names them wrongly and — via mgmt_by_domain — collapses every client
+# of that brokerage into one Management record.
+_THIRD_PARTY_DOMAIN_RE = re.compile(
+    # Residential/commercial brokerages.
+    r"corcoran|bhsusa|halstead|stribling|elliman|century21|weichert"
+    r"|citihabitats|cbrealty|coldwellbanker|sothebysrealty|nestseekers"
+    r"|laffey|ngkf|remax|compass\.com"
+    # Law firms. The dot is required so "lawrencerealty.com" and
+    # "delawareholdings.com" are not caught by a bare "law".
+    r"|law\.(?:com|net|org)|lawfirm|-law\.|legal\.(?:com|net|org)|attorney",
+    re.IGNORECASE,
 )
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$", re.IGNORECASE)
@@ -221,14 +251,107 @@ def normalize_name(value: str | None) -> str:
 
 
 def company_domain(email: str | None) -> str | None:
-    """Domain of a company email, or None for free providers."""
+    """Domain of the email owner's *own* company, or None.
+
+    None for free providers and consumer ISPs (not a company at all) and for
+    brokerages and law firms (a company, but somebody else's).
+    """
     email = normalize_email(email)
     if not email:
         return None
     domain = email.rsplit("@", 1)[1]
     if any(free in domain for free in _FREE_EMAIL_DOMAINS):
         return None
+    if _THIRD_PARTY_DOMAIN_RE.search(domain):
+        return None
     return domain
+
+
+# Suffixes that stay at the end of a name rather than reading as a given
+# name. The roman numerals are tracked separately so title-casing does not
+# turn "III" into "Iii".
+_ROMAN_SUFFIXES = frozenset({"II", "III", "IV", "V"})
+_NAME_SUFFIXES = frozenset({"JR", "SR", "ESQ"}) | _ROMAN_SUFFIXES
+
+# Tokens that mean a comma is separating something other than a surname —
+# a company name, an estate, or an ACRIS annotation. Reordering around one
+# of these produces nonsense, so the name is left exactly as recorded.
+_NOT_A_PERSON_RE = re.compile(
+    r"\b(?:LLC|L\.?L\.?C|INC|CORP|CORPORATION|CO|COMPANY|LP|LLP|LTD|TRUST|"
+    r"ESTATE|ASSOC|ASSOCIATES|PARTNERS|PARTNERSHIP|REALTY|MANAGEMENT|MGMT|"
+    r"PROPERTIES|GROUP|HOLDINGS|ENTERPRISES|BANK|CHURCH|HOUSING|ADMIN|"
+    r"ADMINISTRATOR|EXEC|EXECUTOR|ETAL|ET\s+AL)\b",
+    re.IGNORECASE,
+)
+
+
+def _titlecase(value: str) -> str:
+    """Title-case a person's name, leaving roman-numeral suffixes alone."""
+    return " ".join(
+        word.upper() if word.rstrip(".").upper() in _ROMAN_SUFFIXES else word.title()
+        for word in value.split()
+    )
+
+
+def format_person_name(value: str | None) -> str | None:
+    """'SMITH, JOHN A' -> 'John A Smith'.
+
+    ACRIS records natural persons surname-first, and the sync copies the
+    entity name straight onto a record a human reads in the CRM. The
+    reordering is presentational only — every match key below is derived
+    from the tokens, not their order.
+
+    Returns the input untouched whenever the "LAST, FIRST" reading is not
+    clearly correct, so a company name containing a comma survives intact.
+    """
+    if not value:
+        return value
+    name = value.strip()
+    # "JAMES, DOROTHY M/ADMIN OF" — a slash marks an ACRIS annotation, not
+    # part of anyone's name.
+    if "/" in name or _NOT_A_PERSON_RE.search(name):
+        return value
+
+    parts = [part.strip() for part in name.split(",")]
+    suffix = ""
+    if len(parts) == 2:
+        last, given = parts
+    elif len(parts) == 3 and parts[1].rstrip(".").upper() in _NAME_SUFFIXES:
+        # "BERTH, JR., GEORGE"
+        last, suffix, given = parts[0], parts[1].rstrip("."), parts[2]
+    else:
+        return value
+
+    if not last or not given:
+        return value
+
+    # A suffix trailing the given names belongs at the end of the reordered
+    # form: "AGNEW, ERNEST LLOYD JR" -> "Ernest Lloyd Agnew Jr".
+    given_parts = given.split()
+    if given_parts[-1].rstrip(".").upper() in _NAME_SUFFIXES:
+        suffix = given_parts.pop().rstrip(".")
+    if not given_parts:
+        return value
+
+    ordered = [*given_parts, last]
+    if suffix:
+        ordered.append(suffix)
+    return _titlecase(" ".join(ordered))
+
+
+def person_key(value: str | None) -> str:
+    """Order-insensitive match key for a person's name.
+
+    'SMITH, JOHN' and 'John Smith' are one person. Management records written
+    by earlier runs carry the ACRIS surname-first spelling, so matching on
+    normalize_name() alone would miss every one of them after the reordering
+    above and create a duplicate record for each.
+
+    Unrelated to enrichment.contact.identity.person_key(), which keys a
+    person on name + email + linkedin + phone for the contacts table. This
+    one is name-only and local to Airtable matching.
+    """
+    return " ".join(sorted(normalize_name(value).split()))
 
 
 def format_address(address: str | None, borough: str | None) -> str | None:
@@ -302,6 +425,10 @@ class ManagementUnit:
     addresses: list[str] = field(default_factory=list)
 
     @property
+    def is_person(self) -> bool:
+        return (self.entity_type or "").lower() == "individual"
+
+    @property
     def company_type(self) -> str:
         return _COMPANY_TYPE_MAP.get((self.entity_type or "").lower(), "unknown")
 
@@ -326,6 +453,10 @@ class GateStats:
     dropped_bad_contact_name: int = 0
     dropped_bad_entity: int = 0
     kept: int = 0
+    # Building-size gate, applied per entity after addresses are attached.
+    dropped_small_building: int = 0
+    addresses_below_threshold: int = 0
+    units_size_unknown: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -334,6 +465,9 @@ class GateStats:
             "dropped_bad_contact_name": self.dropped_bad_contact_name,
             "dropped_bad_entity": self.dropped_bad_entity,
             "kept": self.kept,
+            "dropped_small_building": self.dropped_small_building,
+            "addresses_below_threshold": self.addresses_below_threshold,
+            "units_size_unknown": self.units_size_unknown,
         }
 
 
@@ -355,6 +489,11 @@ def load_units(limit: int | None = None) -> tuple[list[ManagementUnit], GateStat
             db().table("contacts")
             .select(_CONTACT_SELECT)
             .or_("email.not.is.null,phone.not.is.null")
+            # Explicit order is required: paging an unordered select lets
+            # Postgres return rows in a different order per request, which
+            # silently drops and duplicates contacts once the table exceeds
+            # one page.
+            .order("id")
             .range(offset, offset + _PAGE - 1)
             .execute()
         )
@@ -398,10 +537,14 @@ def load_units(limit: int | None = None) -> tuple[list[ManagementUnit], GateStat
 
         unit = units.get(entity_id)
         if unit is None:
+            entity_type = entity.get("entity_type")
+            name = entity_name.strip()
+            if (entity_type or "").lower() == "individual":
+                name = format_person_name(name) or name
             unit = ManagementUnit(
                 entity_id=entity_id,
-                name=entity_name.strip(),
-                entity_type=entity.get("entity_type"),
+                name=name,
+                entity_type=entity_type,
                 domain=entity.get("domain"),
             )
             units[entity_id] = unit
@@ -410,7 +553,9 @@ def load_units(limit: int | None = None) -> tuple[list[ManagementUnit], GateStat
             SourceContact(
                 contact_id=row["id"],
                 # Fall back to the company name for a general company contact.
-                name=(row.get("full_name") or entity_name).strip(),
+                # format_person_name is shape-gated, so a company name passes
+                # through unchanged.
+                name=format_person_name((row.get("full_name") or entity_name).strip()),
                 title=(row.get("title") or "").strip() or None,
                 email=email,
                 phone=phone,
@@ -420,7 +565,7 @@ def load_units(limit: int | None = None) -> tuple[list[ManagementUnit], GateStat
         )
         stats.kept += 1
 
-    _attach_addresses(units)
+    _attach_addresses(units, stats)
 
     ordered = sorted(units.values(), key=lambda u: u.name)
     if limit:
@@ -428,15 +573,40 @@ def load_units(limit: int | None = None) -> tuple[list[ManagementUnit], GateStat
     return ordered, stats
 
 
-def _attach_addresses(units: dict[str, ManagementUnit]) -> None:
-    """Fill each unit's addresses from current property_roles."""
+def _attach_addresses(units: dict[str, ManagementUnit], stats: GateStats) -> None:
+    """Fill each unit's addresses from current property_roles, applying the
+    building-size gate.
+
+    The ingest-time gate in `ingest/pluto.py` only covers rows ingested after
+    it existed; the table still holds ~25k lots below the threshold from
+    before. This is the read-side counterpart, so those stop reaching the CRM
+    without being deleted.
+
+    The classification lives in `ingest.pluto.is_landlord_lot()` so the read
+    side and the ingest side cannot drift apart: one-/two-family houses are
+    out, mixed use with any apartment is in.
+
+    Like the ingest gate it FAILS OPEN. A property whose unit_count is NULL
+    (not in PLUTO, or ingested before the backfill) counts as qualifying —
+    an unknown size is not evidence of a single-family house. An entity with
+    no properties at all also survives: management companies reached via a
+    contact's employer have no property_roles of their own, and they are the
+    single most valuable thing in this pipeline.
+    """
+    gate_on = config.PLUTO_GATE_ENABLED
+
+    # entity_id -> did any of its properties meet the threshold (or have an
+    # unknown size)? Entities absent from this map own no properties.
+    qualifies: dict[str, bool] = {}
+
     entity_ids = list(units.keys())
     for chunk in _chunks(entity_ids, 100):
         rows = (
             db().table("property_roles")
-            .select("entity_id,properties(address,borough)")
+            .select("entity_id,properties(address,borough,unit_count,building_class)")
             .in_("entity_id", chunk)
             .eq("is_current", True)
+            .order("id")
             .execute()
         ).data or []
         for row in rows:
@@ -444,9 +614,28 @@ def _attach_addresses(units: dict[str, ManagementUnit]) -> None:
             prop = row.get("properties") or {}
             if not unit:
                 continue
+
+            units_res = prop.get("unit_count")
+            if units_res is None:
+                stats.units_size_unknown += 1
+            keep = is_landlord_lot(units_res, prop.get("building_class"))
+            qualifies[unit.entity_id] = qualifies.get(unit.entity_id, False) or keep
+
+            if gate_on and not keep:
+                stats.addresses_below_threshold += 1
+                continue
+
             formatted = format_address(prop.get("address"), prop.get("borough"))
             if formatted and formatted not in unit.addresses:
                 unit.addresses.append(formatted)
+
+    if not gate_on:
+        return
+
+    for entity_id, ok in qualifies.items():
+        if not ok:
+            units.pop(entity_id, None)
+            stats.dropped_small_building += 1
 
 
 def _chunks(items: list, size: int):
@@ -550,6 +739,25 @@ class AirtableClient:
             self.writes += len(batch)
         return created
 
+    def delete_records(self, table_id: str, record_ids: list[str]) -> int:
+        """Delete records in batches of 10. Returns the count deleted.
+
+        Only ever called by scripts/purge_small_buildings.py — the sync
+        itself is additive and never deletes.
+        """
+        if self.dry_run or not record_ids:
+            return 0
+        real = [r for r in record_ids if str(r).startswith("rec")]
+        if len(real) != len(record_ids):
+            raise ValueError("refusing to delete non-record ids")
+        url = f"{self.API_ROOT}/{self.base_id}/{table_id}"
+        deleted = 0
+        for batch in _chunks(real, self.BATCH_SIZE):
+            payload = self._request("DELETE", url, params={"records[]": batch})
+            deleted += len(payload.get("records", []))
+            self.writes += len(batch)
+        return deleted
+
     def update_records(self, table_id: str, records: list[dict]) -> None:
         """PATCH records in batches of 10 (leaves unlisted fields alone)."""
         if self.dry_run or not records:
@@ -591,6 +799,10 @@ class BaseIndex:
         self.client = client
         self.mgmt_by_id: dict[str, dict] = {}
         self.mgmt_by_name: dict[str, str] = {}
+        # Same records keyed order-insensitively, so a person already in the
+        # base as "SMITH, JOHN" is still found once the sync writes them as
+        # "John Smith". Consulted only for individuals.
+        self.mgmt_by_person_key: dict[str, str] = {}
         self.mgmt_by_domain: dict[str, str] = {}
         # Email/phone -> every contact carrying it. Multi-valued on purpose:
         # a switchboard is shared by a whole firm, so a single-entry index
@@ -614,6 +826,9 @@ class BaseIndex:
             # First writer wins, so a re-run maps onto the same record.
             if key:
                 self.mgmt_by_name.setdefault(key, record["id"])
+                self.mgmt_by_person_key.setdefault(
+                    person_key(fields.get(MgmtField.NAME)), record["id"]
+                )
 
         for record in self.client.list_records(
             config.AIRTABLE_CONTACTS_TABLE_ID,
@@ -706,6 +921,11 @@ class BaseIndex:
             return True
 
         own = self.mgmt_by_name.get(normalize_name(unit.name))
+        if own is None and unit.is_person:
+            # The person's own record may predate the surname-first rename,
+            # and it still has to outrank a weak cross-entity signal — an
+            # exact-name lookup alone would no longer find it.
+            own = self.mgmt_by_person_key.get(person_key(unit.name))
         if own is not None and own != mgmt_id:
             return False
 
@@ -741,6 +961,14 @@ class BaseIndex:
         if candidate and self._acceptable(candidate, unit):
             return candidate, "name_match"
 
+        # 4. The same person under the ACRIS surname-first spelling. Records
+        #    written before names were reordered read "SMITH, JOHN"; without
+        #    this every one of them gets a duplicate on the next run.
+        if unit.is_person:
+            candidate = self.mgmt_by_person_key.get(person_key(unit.name))
+            if candidate and self._acceptable(candidate, unit):
+                return candidate, "person_name_match"
+
         return None, "new"
 
     # -- registration of newly written records ------------------
@@ -756,6 +984,7 @@ class BaseIndex:
         key = normalize_name(unit.name)
         if key:
             self.mgmt_by_name.setdefault(key, record_id)
+            self.mgmt_by_person_key.setdefault(person_key(unit.name), record_id)
         for domain in unit.domains:
             self.mgmt_by_domain.setdefault(domain, record_id)
 
@@ -840,6 +1069,11 @@ class SyncReport:
             f"  dropped, govt/bank/lawyer   "
             f"{self.gate.get('dropped_bad_entity', 0) + self.gate.get('dropped_bad_contact_name', 0)}",
             f"  eligible contacts           {self.gate.get('kept', 0)}",
+            "",
+            "Building-size gate (entities owning nothing at/above the threshold)",
+            f"  entities dropped, too small {self.gate.get('dropped_small_building', 0)}",
+            f"  addresses below threshold   {self.gate.get('addresses_below_threshold', 0)}",
+            f"  properties of unknown size  {self.gate.get('units_size_unknown', 0)} (kept — fails open)",
             "",
             f"Management units              {self.units}",
             f"  created                     {self.mgmt_created}",
@@ -1001,7 +1235,12 @@ def _sync_unit(
     else:
         report.mgmt_matched += 1
         target = index.mgmt_by_id.get(mgmt_id, {}).get(MgmtField.NAME) or mgmt_id
-        if normalize_name(target) != normalize_name(unit.name):
+        # Matching "John Smith" onto the record already reading "SMITH, JOHN"
+        # is the same person, not a merge of two entities.
+        same_record = normalize_name(target) == normalize_name(unit.name) or (
+            unit.is_person and person_key(target) == person_key(unit.name)
+        )
+        if not same_record:
             report.merges.append((unit.name, target, how))
             log.info(
                 "airtable_sync.entity_merged",
